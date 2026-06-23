@@ -34,14 +34,15 @@ validate_app_config <- function(cfg) {
   if (!mfh_cov %in% c("direct", "rho_dir", "rho_sm_out", "rho_sm_all", "zero")) {
     errs <- c(errs, "`mfh.cov_choice` must be one of: direct, rho_dir, rho_sm_out, rho_sm_all, zero.")
   }
-  optional_mfh_paths <- c(
-    regional_benchmark_path = cfg$mfh$regional_benchmark_path,
-    population_path = cfg$mfh$population_path
+  optional_paths <- c(
+    mfh_regional_benchmark_path = cfg$mfh$regional_benchmark_path,
+    mfh_population_path = cfg$mfh$population_path,
+    ufh_population_path = cfg$ufh$population_path
   )
-  for (nm in names(optional_mfh_paths)) {
-    p <- optional_mfh_paths[[nm]]
+  for (nm in names(optional_paths)) {
+    p <- optional_paths[[nm]]
     if (!is.null(p) && length(p) > 0 && isTRUE(nzchar(p)) && !file.exists(p)) {
-      errs <- c(errs, sprintf("`mfh.%s` does not exist: %s", nm, p))
+      errs <- c(errs, sprintf("Optional input `%s` does not exist: %s", nm, p))
     }
   }
 
@@ -216,6 +217,10 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   if (var_map$psu     != "psu")     rename_vec <- c(rename_vec, psu     = var_map$psu)
   if (var_map$welfare != "welfare") rename_vec <- c(rename_vec, welfare = var_map$welfare)
   if (var_map$weight  != "weight")  rename_vec <- c(rename_vec, weight  = var_map$weight)
+  if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
+      var_map$hh_size != "hh_size") {
+    rename_vec <- c(rename_vec, hh_size = var_map$hh_size)
+  }
   if (var_map$year    != "year")    rename_vec <- c(rename_vec, year    = var_map$year)
   # Only rename povline column when the poverty line comes from data
   if (identical(povline_type, "column") && !is.null(var_map$povline) &&

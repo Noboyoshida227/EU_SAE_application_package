@@ -135,6 +135,10 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   if (var_map$psu     != "psu")     rename_vec <- c(rename_vec, psu     = var_map$psu)
   if (var_map$welfare != "welfare") rename_vec <- c(rename_vec, welfare = var_map$welfare)
   if (var_map$weight  != "weight")  rename_vec <- c(rename_vec, weight  = var_map$weight)
+  if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
+      var_map$hh_size != "hh_size") {
+    rename_vec <- c(rename_vec, hh_size = var_map$hh_size)
+  }
   if (var_map$year    != "year")    rename_vec <- c(rename_vec, year    = var_map$year)
   # Only rename povline column when the poverty line comes from data
   if (identical(povline_type, "column") && !is.null(var_map$povline) &&
@@ -800,7 +804,7 @@ ui <- fluidPage(
                   "Optional RDS/CSV/XLSX file with direct regional benchmark estimates by region and year. If supplied, MFH regional benchmarking uses these targets instead of aggregating domain-level direct estimates.")),
       fileInput("population_file",
         tip_label("Domain population sizes (optional)",
-                  "Optional RDS/CSV/XLSX file with domain population sizes. Supports long domain-year-population format or wide domain-by-year format; leave blank to use the default sizeprov populations.")),
+                  "Optional RDS/CSV/XLSX file with domain population sizes. Supports long domain-year-population format or wide domain-by-year format; leave blank to estimate domain populations from the survey as sum(weight * household size).")),
       tags$hr(),
 
       # ---- Variable mapping ----
@@ -817,6 +821,9 @@ ui <- fluidPage(
       textInput("var_weight",
         tip_label("weight", "Column name for the survey sampling weight."),
         "weight"),
+      textInput("var_hh_size",
+        tip_label("household size", "Column name for household size. When no population file is uploaded, benchmarking estimates domain populations as sum(weight * household size) by domain and year."),
+        "hhsize"),
       textInput("var_welfare",
         tip_label("welfare", "Column name for the welfare variable (e.g. income or consumption) used to determine poverty status."),
         "income"),
@@ -1147,6 +1154,7 @@ server <- function(input, output, session) {
       domain  = input$var_domain,
       psu     = input$var_psu,
       weight  = input$var_weight,
+      hh_size = input$var_hh_size,
       welfare = input$var_welfare,
       poor    = "poor"
     )
@@ -1525,7 +1533,7 @@ server <- function(input, output, session) {
       # Files and variable mapping
       input$survey_file, input$rhs_file, input$shp_file,
       input$var_year, input$var_domain, input$var_psu,
-      input$var_weight, input$var_welfare, input$var_povline,
+      input$var_weight, input$var_hh_size, input$var_welfare, input$var_povline,
       input$rhs_domain, input$shp_domain,
       # Poverty-line config
       input$povline_type, input$povline_numeric,
@@ -1664,6 +1672,15 @@ server <- function(input, output, session) {
                        (identical(input$ufh_transformation, "log") ||
                         identical(input$mfh_transformation, "log"))
     )
+    if (is.null(population_path) && !"hh_size" %in% names(harmonized$survey)) {
+      rr$messages <- c(
+        sprintf(
+          "Test 0c: WARNING -- No population file uploaded and household-size column '%s' was not found. Benchmarking cannot estimate domain populations as weight * household size.",
+          var_map$hh_size %||% "hh_size"
+        ),
+        rr$messages
+      )
+    }
     rr$messages <- c(year_msgs, rr$messages)
     readiness_result(rr)
     append_log(sprintf("Data readiness: %d diagnostic messages", length(rr$messages)))
@@ -1844,6 +1861,15 @@ server <- function(input, output, session) {
                          (identical(input$ufh_transformation, "log") ||
                           identical(input$mfh_transformation, "log"))
       )
+      if (is.null(population_path) && !"hh_size" %in% names(harmonized$survey)) {
+        rr$messages <- c(
+          sprintf(
+            "Test 0c: WARNING -- No population file uploaded and household-size column '%s' was not found. Benchmarking cannot estimate domain populations as weight * household size.",
+            var_map$hh_size %||% "hh_size"
+          ),
+          rr$messages
+        )
+      }
       # Prepend year-variable checks to readiness messages
       rr$messages <- c(year_msgs, rr$messages)
       readiness_result(rr)
@@ -2000,6 +2026,7 @@ server <- function(input, output, session) {
       survey_path             = survey_path %||% "data/pov_direct3.rds",
       rhs_path                = rhs_path    %||% "data/sae_data.rds",
       shp_path                = shp_path    %||% "data/geometries.rds",
+      population_path         = population_path,
       var_map                 = var_map,
       rhs_domain              = input$rhs_domain,
       shp_domain              = input$shp_domain,

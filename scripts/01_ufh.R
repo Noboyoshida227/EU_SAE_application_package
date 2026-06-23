@@ -42,6 +42,7 @@ conflicted::conflict_prefer("first",  "dplyr")
 conflicted::conflict_prefer("recode", "dplyr")
 
 source(here::here("scripts", "ufh_functions.R"))
+source(here::here("scripts", "population_helpers.R"))
 
 
 # ============================================================
@@ -105,6 +106,7 @@ if (identical(indicator_type, "poverty")) {
 survey_path <- cfg_or_default(ufh_cfg$survey_path, here::here("data", "pov_direct3.rds"))
 rhs_path    <- cfg_or_default(ufh_cfg$rhs_path,    here::here("data", "sae_data.rds"))
 shp_path    <- cfg_or_default(ufh_cfg$shp_path,    here::here("data", "geometries.rds"))
+population_path <- cfg_or_default(ufh_cfg$population_path, "")
 
 cat("UFH data paths:\n")
 cat("  survey:", survey_path, "\n")
@@ -123,7 +125,8 @@ survey_raw <- survey_raw %>% select(-any_of("provlab"))
 # ---- Variable name mapping (from config or defaults) ----
 default_var_map <- list(
   year = "year", domain = "prov", psu = "ea_id",
-  weight = "weight", welfare = "income", povline = "povline", poor = "poor"
+  weight = "weight", hh_size = "hhsize",
+  welfare = "income", povline = "povline", poor = "poor"
 )
 if (!is.null(ufh_cfg$var_map)) {
   var_map <- modifyList(default_var_map, ufh_cfg$var_map)
@@ -141,6 +144,10 @@ rename_cols <- c(
 if (identical(indicator_type, "poverty") &&
     povline_type == "column" && !is.null(var_map$povline)) {
   rename_cols <- c(rename_cols, povline = var_map$povline)
+}
+if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
+    var_map$hh_size %in% names(survey_raw) && var_map$hh_size != "hh_size") {
+  rename_cols <- c(rename_cols, hh_size = var_map$hh_size)
 }
 survey_all <- survey_raw %>% rename(!!!rename_cols)
 # When the poverty line is a numeric constant, create the column (poverty only)
@@ -392,7 +399,8 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
                         transformation = "arcsin",
                         backtransformation = "bc",
                         formula_override = NULL,
-                        var_choice = "sm_out") {
+                        var_choice = "sm_out",
+                        population_path = "") {
 
   # Back-transformation is only meaningful under arcsin. If the caller passes
   # "bc"/"naive" together with transformation = "no", silently drop it so we
@@ -601,12 +609,22 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
   # Each region's target = population-weighted average of direct province rates.
   # A per-region ratio factor is applied so that the weighted mean of the
   # benchmarked FH estimates within every region equals that region's target.
-  data("sizeprov")
-  sizeprov <- sizeprov |> rename(domain = prov)
+  population_mat <- sae_resolve_population_matrix(
+    population_path = population_path,
+    survey_data = survey_all,
+    domain_vec = fh_dt$Domain,
+    years_keep = years_keep,
+    hh_size_col = "hh_size",
+    context = paste0("UFH year ", yr)
+  )
+  pop_dt <- tibble::tibble(
+    domain = fh_dt$Domain,
+    Nd = as.numeric(population_mat[as.character(fh_dt$Domain), as.character(yr)])
+  )
 
   fh_dt <- fh_dt |> rename(domain = Domain)
   fh_dt <- fh_dt |>
-    left_join(sizeprov |> mutate(ratio_n = Nd / sum(Nd)), by = "domain") |>
+    left_join(pop_dt |> mutate(ratio_n = Nd / sum(Nd)), by = "domain") |>
     left_join(region_map, by = "domain")
 
   # Region-level benchmarks: weighted avg of direct province poverty rates
@@ -724,17 +742,12 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
     if ("FH" %in% names(pov_fh) && "FH_Bench" %in% names(pov_fh)) {
       reg_lookup <- .direct_norm |>
         dplyr::left_join(region_map, by = "domain") |>
+        dplyr::left_join(pop_dt, by = "domain") |>
         dplyr::left_join(
           dplyr::tibble(domain = pov_fh$domain, FH_eur = pov_fh$FH),
           by = "domain"
         )
-      if ("Nd" %in% names(reg_lookup) || requireNamespace("emdi", quietly = TRUE)) {
-        if (!"Nd" %in% names(reg_lookup)) {
-          data("sizeprov", envir = environment())
-          reg_lookup <- reg_lookup |>
-            dplyr::left_join(sizeprov |> dplyr::rename(domain = prov),
-                              by = "domain")
-        }
+      if ("Nd" %in% names(reg_lookup)) {
         region_lambda <- reg_lookup |>
           dplyr::filter(!is.na(direct_arith), !is.na(FH_eur), !is.na(Nd)) |>
           dplyr::group_by(region) |>
@@ -902,7 +915,8 @@ res_y1 <- run_fh_year(yr = years_keep[1],
                       transformation = ufh_transformation,
                       backtransformation = ufh_backtrans_method,
                       formula_override = ufh_formula_override_y1,
-                      var_choice = ufh_var_choice)
+                      var_choice = ufh_var_choice,
+                      population_path = population_path)
 
 fh_results_list[[as.character(years_keep[1])]] <- res_y1$pov_fh
 
@@ -1162,7 +1176,8 @@ res_y2 <- run_fh_year(yr = years_keep[2],
                       transformation = ufh_transformation,
                       backtransformation = ufh_backtrans_method,
                       formula_override = ufh_formula_override_y2,
-                      var_choice = ufh_var_choice)
+                      var_choice = ufh_var_choice,
+                      population_path = population_path)
 
 fh_results_list[[as.character(years_keep[2])]] <- res_y2$pov_fh
 

@@ -44,6 +44,7 @@ conflicted::conflict_prefer("recode", "dplyr")
 
 source(here::here("scripts", "ufh_functions.R"))
 source(here::here("scripts", "mcpe_functions.R"))
+source(here::here("scripts", "population_helpers.R"))
 
 # ---- Invalidate stale MFH output artifacts ----
 dir.create(here::here("outputs", "data"), showWarnings = FALSE, recursive = TRUE)
@@ -251,6 +252,7 @@ var_map <- list(
   domain   = "prov",      # small area / domain identifier
   psu      = "ea_id",     # primary sampling unit
   weight   = "weight",    # survey weights
+  hh_size  = "hhsize",    # household size for population weights
   welfare  = "income",    # welfare aggregate
   povline  = "povline",   # poverty line
   poor     = "poor",      # poverty indicator (if exists)
@@ -269,6 +271,10 @@ rename_cols_mfh <- c(
 if (identical(indicator_type, "poverty") &&
     povline_type == "column" && !is.null(var_map$povline)) {
   rename_cols_mfh <- c(rename_cols_mfh, povline = var_map$povline)
+}
+if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
+    var_map$hh_size %in% names(survey_raw) && var_map$hh_size != "hh_size") {
+  rename_cols_mfh <- c(rename_cols_mfh, hh_size = var_map$hh_size)
 }
 survey_dt <- survey_raw %>% rename(!!!rename_cols_mfh)
 # Mean-welfare runs ignore the poverty line; ensure the column exists for
@@ -389,13 +395,6 @@ if ("region" %in% colnames(survey_dt)) {
             "Regional benchmarking will be skipped.")
     do_benchmark <- FALSE
   }
-}
-
-# ---- Domain population sizes ----
-# Uses sizeprov from the sae package (same as UFH pipeline)
-if (do_benchmark) {
-  data("sizeprov", package = "sae")
-  sizeprov <- sizeprov %>% rename(domain = prov)
 }
 
 # Source benchmarking functions for MFH
@@ -1694,24 +1693,16 @@ if (do_benchmark && !is.null(region_map)) {
 
   # Region and population size vectors aligned to domain_dt
   bench_region <- region_map$region[match(bench_domains, region_map$domain)]
-  bench_Nd     <- sizeprov$Nd[match(bench_domains, sizeprov$domain)]
-  bench_Nd_mat <- matrix(
-    bench_Nd,
-    nrow = length(bench_domains),
-    ncol = length(years_keep),
-    dimnames = list(as.character(bench_domains), as.character(years_keep))
-  )
-
   population_path <- cfg_or_default(mfh_cfg$population_path, "")
-  if (nzchar(population_path)) {
-    bench_Nd_mat <- .matrix_from_optional_population(
-      population_path,
-      domain_vec = bench_domains,
-      years_keep = years_keep
-    )
-    bench_Nd <- bench_Nd_mat[, 1]
-    cat("Using external domain population sizes for benchmarking:", population_path, "\n")
-  }
+  bench_Nd_mat <- sae_resolve_population_matrix(
+    population_path = population_path,
+    survey_data = survey_dt,
+    domain_vec = bench_domains,
+    years_keep = years_keep,
+    hh_size_col = "hh_size",
+    context = "MFH benchmarking"
+  )
+  bench_Nd <- bench_Nd_mat[, 1]
 
   regional_benchmark_path <- cfg_or_default(mfh_cfg$regional_benchmark_path, "")
   regional_benchmark_mat <- .matrix_from_optional_regional_benchmark(
@@ -1977,21 +1968,14 @@ if (identical(indicator_type, "mean_welfare") && isTRUE(log_transform)) {
   # by (lambda_eur / lambda_log_implicit)Â² so the precision columns stay
   # consistent with the new point estimate.
   if ("rate_Bench" %in% names(db_wide_all) &&
-      !is.null(region_map) && exists("sizeprov")) {
+      !is.null(region_map) && exists("bench_Nd_mat")) {
     eblup_eur_col   <- rate_col            # rate_MFH1/2/3 already back-transformed
     rate_bench_old  <- db_wide_all$rate_Bench  # log-scale-derived bench in EUR
-    if (exists("bench_Nd_mat")) {
-      bench_pop_lookup <- as.data.frame(as.table(bench_Nd_mat),
-                                        stringsAsFactors = FALSE)
-      names(bench_pop_lookup) <- c("domain", "year", "Nd")
-      bench_pop_lookup <- bench_pop_lookup %>%
-        mutate(domain = as.integer(domain), year = as.integer(year))
-    } else {
-      bench_pop_lookup <- db_wide_all %>%
-        select(domain, year) %>%
-        left_join(sizeprov, by = "domain") %>%
-        select(domain, year, Nd)
-    }
+    bench_pop_lookup <- as.data.frame(as.table(bench_Nd_mat),
+                                      stringsAsFactors = FALSE)
+    names(bench_pop_lookup) <- c("domain", "year", "Nd")
+    bench_pop_lookup <- bench_pop_lookup %>%
+      mutate(domain = as.integer(domain), year = as.integer(year))
     bench_inputs <- db_wide_all %>%
       transmute(
         domain, year,
