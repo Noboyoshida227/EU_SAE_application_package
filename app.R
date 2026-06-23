@@ -158,6 +158,11 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   if (identical(povline_type, "numeric") && !is.null(povline_value)) {
     survey_data$povline <- as.numeric(povline_value)
   }
+  if (all(c("weight", "hh_size") %in% names(survey_data))) {
+    survey_data$population_weight <- suppressWarnings(
+      as.numeric(survey_data$weight) * as.numeric(survey_data$hh_size)
+    )
+  }
 
   rhs_data <- rhs_raw
   if (rhs_domain != "domain" && rhs_domain %in% names(rhs_data)) {
@@ -169,7 +174,7 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
 
 # Helper: compute per-year data summaries for diagnostics / brief
 # Now indicator-aware: for "mean_welfare" the per-domain summary is
-# the (unweighted) domain mean of welfare (optionally on the log scale)
+# the population-weighted domain mean of welfare (optionally on the log scale)
 # instead of the FGT.
 build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
                                indicator_type = "poverty",
@@ -177,12 +182,16 @@ build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
   sv <- survey_data[survey_data$year == yr, ]
   n_domains <- length(unique(sv$domain))
 
-  # Weighted per-domain summary so the dashboard agrees with the
+  # Population-weighted per-domain summary so the dashboard agrees with the
   # `survey::svymean()`-based direct estimates the pipeline actually
-  # exports. Using `tapply(..., mean)` would give an unweighted mean
-  # which can disagree with the exported Direct column (e.g. a domain's
-  # arithmetic weighted mean of welfare can differ noticeably from its
-  # unweighted mean if weights are heterogeneous).
+  # exports. The analysis weight is weight * household size when available.
+  analysis_weight <- if ("population_weight" %in% names(sv)) {
+    sv$population_weight
+  } else if (all(c("weight", "hh_size") %in% names(sv))) {
+    suppressWarnings(as.numeric(sv$weight) * as.numeric(sv$hh_size))
+  } else {
+    sv$weight
+  }
   weighted_mean_by_domain <- function(target, domain, weight) {
     domains <- unique(domain)
     out <- setNames(rep(NA_real_, length(domains)), as.character(domains))
@@ -202,14 +211,14 @@ build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
     # TRUE, but that's a model-internal detail and not what the
     # diagnostics tab should display.
     w <- as.numeric(sv$welfare)
-    pov_rates <- weighted_mean_by_domain(w, sv$domain, sv$weight)
+    pov_rates <- weighted_mean_by_domain(w, sv$domain, analysis_weight)
   } else {
     fgt_vals <- if (fgt_alpha == 0L) {
       as.numeric(sv$welfare < sv$povline)
     } else {
       pmax(0, (sv$povline - sv$welfare) / sv$povline)^fgt_alpha
     }
-    pov_rates <- weighted_mean_by_domain(fgt_vals, sv$domain, sv$weight)
+    pov_rates <- weighted_mean_by_domain(fgt_vals, sv$domain, analysis_weight)
   }
 
   diag <- list(
@@ -670,7 +679,7 @@ ui <- fluidPage(
         <tr>
           <td>Transformation (MFH, mean welfare only)</td>
           <td><code>log</code> (default) / <code>no</code></td>
-          <td>Independent from the UFH transformation. <code>log</code> fits MFH on log(welfare) per year and back-transforms each (domain, year) cell with a per-domain-year smearing factor anchored to the survey-weighted arithmetic mean of welfare. MCPE for cross-year change analysis is back-transformed to currency units via a delta-method approximation, so significance tests for changes stay on the EUR scale. <code>no</code> fits on the identity (currency) scale. (For poverty rates, MFH always uses the identity scale &mdash; arcsin is not an option.)</td>
+          <td>Independent from the UFH transformation. <code>log</code> fits MFH on log(welfare) per year and back-transforms each (domain, year) cell with a per-domain-year smearing factor anchored to the population-weighted arithmetic mean of welfare. MCPE for cross-year change analysis is back-transformed to currency units via a delta-method approximation, so significance tests for changes stay on the EUR scale. <code>no</code> fits on the identity (currency) scale. (For poverty rates, MFH always uses the identity scale &mdash; arcsin is not an option.)</td>
         </tr>
         <tr>
           <td>Bias Correction (MFH, log only)</td>
@@ -741,7 +750,7 @@ ui <- fluidPage(
                 "matching the Indicator selector) for all numeric covariates."),
         tags$li(tags$strong("Domain consistency"), " \u2014 checks that domain identifiers align across the survey, auxiliary, and geometry datasets."),
         tags$li(tags$strong("Missing poverty rates"), " \u2014 identifies domain-year combinations that lack survey-based poverty estimates."),
-        tags$li(tags$strong("National poverty headcount"), " \u2014 reports the weighted national average poverty rate for each year.")
+        tags$li(tags$strong("National poverty headcount"), " \u2014 reports the population-weighted national average poverty rate for each year.")
       ),
       tags$p("The tab also shows tables for national poverty rates, domain consistency, missing rates, ",
              "and auxiliary covariate statistics. Results are saved to ", tags$code("outputs/tables/"), " as CSV files."),
@@ -822,7 +831,7 @@ ui <- fluidPage(
         tip_label("weight", "Column name for the survey sampling weight."),
         "weight"),
       textInput("var_hh_size",
-        tip_label("household size", "Column name for household size. When no population file is uploaded, benchmarking estimates domain populations as sum(weight * household size) by domain and year."),
+        tip_label("household size", "Column name for household size. Direct poverty-rate estimates use population_weight = weight * household size; when no population file is uploaded, benchmarking also estimates domain populations as sum(weight * household size) by domain and year."),
         "hhsize"),
       textInput("var_welfare",
         tip_label("welfare", "Column name for the welfare variable (e.g. income or consumption) used to determine poverty status."),
@@ -834,7 +843,7 @@ ui <- fluidPage(
       # an optional log-transform.
       selectInput("indicator_type",
         tip_label("Indicator",
-                  "What is being modelled. 'Poverty (FGT)' uses welfare + a poverty line to compute headcount, gap, or severity. 'Mean welfare' uses the survey-weighted mean of the welfare variable directly."),
+                  "What is being modelled. 'Poverty (FGT)' uses welfare + a poverty line to compute headcount, gap, or severity. 'Mean welfare' uses the population-weighted mean of the welfare variable directly."),
         choices  = c("Poverty (FGT)" = "poverty",
                      "Mean welfare"  = "mean_welfare"),
         selected = "poverty"),
@@ -959,7 +968,7 @@ ui <- fluidPage(
           tip_label("Transformation (MFH)",
                     paste(
                       "Transformation applied to the MFH model. Independent of the UFH choice above.",
-                      "'log' fits MFH on log(welfare) per year, then back-transforms each (domain, year) cell with a per-domain-year smearing factor anchored to the survey-weighted arithmetic mean of welfare. MCPE is back-transformed to currency units via a delta-method approximation, so cross-year change analysis stays on the EUR scale.",
+                      "'log' fits MFH on log(welfare) per year, then back-transforms each (domain, year) cell with a per-domain-year smearing factor anchored to the population-weighted arithmetic mean of welfare. MCPE is back-transformed to currency units via a delta-method approximation, so cross-year change analysis stays on the EUR scale.",
                       "'no' fits on the identity scale.")),
           choices = c("log", "no"), selected = "log"),
         conditionalPanel(
@@ -1111,7 +1120,7 @@ server <- function(input, output, session) {
 
   status    <- reactiveVal("Idle")
   logs      <- reactiveVal("")
-  output_rows <- reactiveVal(data.frame(File = character(), Exists = logical(), stringsAsFactors = FALSE))
+  output_rows <- reactiveVal(data.frame(File = character(), Description = character(), Exists = character(), stringsAsFactors = FALSE))
 
   # Reactive stores for validation, diagnostics, and brief
   validation_result <- reactiveVal(NULL)
@@ -1672,15 +1681,6 @@ server <- function(input, output, session) {
                        (identical(input$ufh_transformation, "log") ||
                         identical(input$mfh_transformation, "log"))
     )
-    if (is.null(population_path) && !"hh_size" %in% names(harmonized$survey)) {
-      rr$messages <- c(
-        sprintf(
-          "Test 0c: WARNING -- No population file uploaded and household-size column '%s' was not found. Benchmarking cannot estimate domain populations as weight * household size.",
-          var_map$hh_size %||% "hh_size"
-        ),
-        rr$messages
-      )
-    }
     rr$messages <- c(year_msgs, rr$messages)
     readiness_result(rr)
     append_log(sprintf("Data readiness: %d diagnostic messages", length(rr$messages)))
@@ -1861,15 +1861,6 @@ server <- function(input, output, session) {
                          (identical(input$ufh_transformation, "log") ||
                           identical(input$mfh_transformation, "log"))
       )
-      if (is.null(population_path) && !"hh_size" %in% names(harmonized$survey)) {
-        rr$messages <- c(
-          sprintf(
-            "Test 0c: WARNING -- No population file uploaded and household-size column '%s' was not found. Benchmarking cannot estimate domain populations as weight * household size.",
-            var_map$hh_size %||% "hh_size"
-          ),
-          rr$messages
-        )
-      }
       # Prepend year-variable checks to readiness messages
       rr$messages <- c(year_msgs, rr$messages)
       readiness_result(rr)
@@ -2264,10 +2255,15 @@ server <- function(input, output, session) {
       "Detailed comparison of UFH and MFH poverty estimates with CVs and MSEs for every domain and year",
       "Combined statistical significance tests for year-on-year poverty changes from both models"
     )
+    exists_status <- ifelse(file.exists(files), "TRUE", "FALSE")
+    ai_note_idx <- files == "outputs/comparison_ai_note.html"
+    if (any(ai_note_idx) && !ai_note_eligible) {
+      exists_status[ai_note_idx] <- "Not requested (AI off)"
+    }
     output_rows(data.frame(
       File        = files,
       Description = descriptions,
-      Exists      = file.exists(files),
+      Exists      = exists_status,
       stringsAsFactors = FALSE
     ))
 

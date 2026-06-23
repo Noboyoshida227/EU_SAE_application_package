@@ -240,6 +240,11 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   if (identical(povline_type, "numeric") && !is.null(povline_value)) {
     survey_data$povline <- as.numeric(povline_value)
   }
+  if (all(c("weight", "hh_size") %in% names(survey_data))) {
+    survey_data$population_weight <- suppressWarnings(
+      as.numeric(survey_data$weight) * as.numeric(survey_data$hh_size)
+    )
+  }
 
   rhs_data <- rhs_raw
   if (rhs_domain != "domain" && rhs_domain %in% names(rhs_data)) {
@@ -251,7 +256,7 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
 
 # Helper: compute per-year data summaries for diagnostics / brief
 # Now indicator-aware: for "mean_welfare" the per-domain summary is
-# the (unweighted) domain mean of welfare (optionally on the log scale)
+# the population-weighted domain mean of welfare (optionally on the log scale)
 # instead of the FGT.
 build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
                                indicator_type = "poverty",
@@ -259,12 +264,16 @@ build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
   sv <- survey_data[survey_data$year == yr, ]
   n_domains <- length(unique(sv$domain))
 
-  # Weighted per-domain summary so the dashboard agrees with the
+  # Population-weighted per-domain summary so the dashboard agrees with the
   # `survey::svymean()`-based direct estimates the pipeline actually
-  # exports. Using `tapply(..., mean)` would give an unweighted mean
-  # which can disagree with the exported Direct column (e.g. a domain's
-  # arithmetic weighted mean of welfare can differ noticeably from its
-  # unweighted mean if weights are heterogeneous).
+  # exports. The analysis weight is weight * household size when available.
+  analysis_weight <- if ("population_weight" %in% names(sv)) {
+    sv$population_weight
+  } else if (all(c("weight", "hh_size") %in% names(sv))) {
+    suppressWarnings(as.numeric(sv$weight) * as.numeric(sv$hh_size))
+  } else {
+    sv$weight
+  }
   weighted_mean_by_domain <- function(target, domain, weight) {
     domains <- unique(domain)
     out <- setNames(rep(NA_real_, length(domains)), as.character(domains))
@@ -284,14 +293,14 @@ build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
     # TRUE, but that's a model-internal detail and not what the
     # diagnostics tab should display.
     w <- as.numeric(sv$welfare)
-    pov_rates <- weighted_mean_by_domain(w, sv$domain, sv$weight)
+    pov_rates <- weighted_mean_by_domain(w, sv$domain, analysis_weight)
   } else {
     fgt_vals <- if (fgt_alpha == 0L) {
       as.numeric(sv$welfare < sv$povline)
     } else {
       pmax(0, (sv$povline - sv$welfare) / sv$povline)^fgt_alpha
     }
-    pov_rates <- weighted_mean_by_domain(fgt_vals, sv$domain, sv$weight)
+    pov_rates <- weighted_mean_by_domain(fgt_vals, sv$domain, analysis_weight)
   }
 
   diag <- list(

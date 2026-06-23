@@ -112,13 +112,24 @@ if (!is.null(.cmp_cfg$ufh)) {
                      .cmp_cfg$ufh$ic_criterion %||% "(unset)"))
 }
 
-fh_models <- list(
-  `2012` = readRDS(here::here("outputs", "data", "fh_model_y1.rds")),
-  `2013` = readRDS(here::here("outputs", "data", "fh_model_y2.rds"))
-)
-
 mfh_artifacts <- readRDS(here::here("outputs", "data", "mfh_artifacts.rds"))
 years_keep <- as.integer(mfh_artifacts$years_keep)
+if (length(years_keep) != 2 || any(is.na(years_keep))) {
+  years_keep <- as.integer(.cmp_cfg$mfh$years_keep %||%
+                             .cmp_cfg$ufh$years_keep %||%
+                             .cmp_cfg$years_keep %||%
+                             c(2012L, 2013L))
+}
+if (length(years_keep) != 2 || any(is.na(years_keep))) {
+  stop("Comparison requires exactly two configured analysis years.")
+}
+
+fh_model_paths <- c(
+  here::here("outputs", "data", "fh_model_y1.rds"),
+  here::here("outputs", "data", "fh_model_y2.rds")
+)
+fh_models <- stats::setNames(lapply(fh_model_paths, readRDS),
+                             as.character(years_keep))
 selected_mfh_model <- mfh_artifacts$selected_model
 mfh_formula <- mfh_artifacts$formula
 diag_model <- if (!is.null(mfh_artifacts$diag_model)) mfh_artifacts$diag_model else "MFH2"
@@ -138,20 +149,85 @@ diag_model <- if (!is.null(mfh_artifacts$diag_model)) mfh_artifacts$diag_model e
 .mfh_mse_col  <- paste0("mse_",  diag_model)
 .mfh_cv_col   <- paste0("cv_",   diag_model)
 
+.cmp_clean_domain <- function(x) {
+  trimws(as.character(x))
+}
 
-shp_dt <- readRDS(here::here("data", "geometries.rds")) %>%
-  rename(domain = prov) %>%
-  mutate(domain = as.integer(domain))
+.cmp_first_nonempty <- function(...) {
+  vals <- list(...)
+  for (x in vals) {
+    if (!is.null(x) && length(x) > 0 && !is.na(x[[1]]) && nzchar(as.character(x[[1]]))) {
+      return(as.character(x[[1]]))
+    }
+  }
+  ""
+}
+
+.cmp_first_existing <- function(...) {
+  vals <- unlist(list(...), use.names = FALSE)
+  vals <- vals[!is.na(vals) & nzchar(vals)]
+  for (x in vals) {
+    if (file.exists(x)) return(x)
+  }
+  ""
+}
+
+.configured_shp_path <- .cmp_first_nonempty(.cmp_cfg$mfh$shp_path,
+                                            .cmp_cfg$ufh$shp_path)
+if (nzchar(.configured_shp_path)) {
+  .shp_path <- .configured_shp_path
+  if (!file.exists(.shp_path)) {
+    stop(
+      "Comparison step could not open the configured geometry file: ",
+      .shp_path,
+      "\nThis is usually a temporary uploaded file that is no longer available. ",
+      "Please rerun the app with the geometry file uploaded, or provide a stable geometry RDS path."
+    )
+  }
+} else {
+  .shp_path <- .cmp_first_existing(
+    here::here("data", "geometries.rds"),
+    here::here("sample_data", "geometries.rds")
+  )
+  if (!nzchar(.shp_path)) {
+    stop("Comparison step could not find a geometry RDS file. Checked data/geometries.rds and sample_data/geometries.rds.")
+  }
+}
+
+.shp_domain_col <- .cmp_first_nonempty(.cmp_cfg$mfh$shp_domain,
+                                       .cmp_cfg$ufh$shp_domain,
+                                       .cmp_cfg$mfh$var_map$domain,
+                                       .cmp_cfg$ufh$var_map$domain,
+                                       "prov")
+.diag_push(paste0("Geometry path: ", .shp_path))
+.diag_push(paste0("Geometry domain column requested: ", .shp_domain_col))
+
+shp_raw <- readRDS(.shp_path)
+if (!.shp_domain_col %in% names(shp_raw)) {
+  .domain_candidates <- c("domain", "Domain", "prov", "province", "NUTS_ID",
+                          "nuts_id", "NUTS3", "nuts3", "id", "ID")
+  .domain_candidates <- unique(c(.shp_domain_col, .domain_candidates))
+  .shp_domain_col <- .domain_candidates[.domain_candidates %in% names(shp_raw)][1]
+}
+if (is.na(.shp_domain_col) || !nzchar(.shp_domain_col)) {
+  stop("Comparison geometry data does not contain a usable domain column. Available columns: ",
+       paste(names(shp_raw), collapse = ", "))
+}
+.diag_push(paste0("Geometry domain column used: ", .shp_domain_col))
+
+shp_dt <- shp_raw %>%
+  rename(domain = all_of(.shp_domain_col)) %>%
+  mutate(domain = .cmp_clean_domain(domain))
 
 pov_fh <- read_excel(here::here("outputs", "data", "pov_fh.xlsx")) %>%
   mutate(
-    domain = as.integer(domain),
+    domain = .cmp_clean_domain(domain),
     year = as.integer(year)
   )
 
 pov_mfh <- read_excel(here::here("outputs", "data", "pov_mfh.xlsx")) %>%
   mutate(
-    domain = as.integer(domain),
+    domain = .cmp_clean_domain(domain),
     year = as.integer(year)
   )
 
@@ -186,10 +262,10 @@ tryCatch(
 )
 
 sig_fh <- read.csv(here::here("outputs", "tables", "statistical_significance_results_unbench.csv")) %>%
-  mutate(domain = as.integer(domain))
+  mutate(domain = .cmp_clean_domain(domain))
 
 sig_fh_bench <- read.csv(here::here("outputs", "tables", "statistical_significance_results.csv")) %>%
-  mutate(domain = as.integer(domain))
+  mutate(domain = .cmp_clean_domain(domain))
 
 # Read the MFH change-analysis CSVs defensively. The MFH stage cleans
 # these files at startup and only rewrites them when the corresponding
@@ -212,7 +288,7 @@ sig_fh_bench <- read.csv(here::here("outputs", "tables", "statistical_significan
   tryCatch({
     df <- read.csv(path)
     if (!"domain" %in% names(df)) return(.empty_change_df())
-    df %>% mutate(domain = as.integer(domain))
+    df %>% mutate(domain = .cmp_clean_domain(domain))
   }, error = function(e) .empty_change_df())
 }
 
@@ -426,7 +502,7 @@ prepare_sig_tbl <- function(df, method_label, signif_true = c("TRUE", "Significa
   }
   df %>%
     transmute(
-      domain = as.integer(domain),
+      domain = .cmp_clean_domain(domain),
       diff = as.numeric(diff),
       mse = as.numeric(mse),
       lb = as.numeric(lb),
@@ -856,104 +932,28 @@ plot_density <- function(data, year_val, comp_val) {
 }
 
 
-plot_qq(normality_long, "FH", 2012, "Residual")
+for (.yr in years_keep) {
+  plot_qq(normality_long, "FH", .yr, "Residual")
+  plot_qq(normality_long, "FH", .yr, "Random effect")
+  plot_qq(normality_long, "MFH", .yr, "Residual")
+  if (.mfh_not_executed || .mfh_re_all_zero) {
+    cat("*Skipped -- MFH random effects are unavailable for this run.*\n")
+  } else {
+    plot_qq(normality_long, "MFH", .yr, "Random effect")
+  }
 
+  plot_density(normality_long, .yr, "Residual")
+  if (.mfh_not_executed || .mfh_re_all_zero) {
+    cat("*Skipped -- MFH random effects are unavailable for this run.*\n")
+  } else {
+    plot_density(normality_long, .yr, "Random effect")
+  }
 
-plot_qq(normality_long, "FH", 2013, "Residual")
-
-
-plot_qq(normality_long, "FH", 2012, "Random effect")
-
-
-plot_qq(normality_long, "FH", 2013, "Random effect")
-
-
-plot_qq(normality_long, "MFH", 2012, "Residual")
-
-
-plot_qq(normality_long, "MFH", 2013, "Residual")
-
-
-if (.mfh_not_executed || .mfh_re_all_zero) {
-  cat("*Skipped -- MFH random effects are unavailable for this run.*\n")
-} else {
-  plot_qq(normality_long, "MFH", 2012, "Random effect")
+  for (.metric in c("rate", "mse", "rmse", "cv")) {
+    plot_metric_comparison(.yr, .metric, include_direct = TRUE)
+    plot_metric_comparison(.yr, .metric, include_direct = FALSE)
+  }
 }
-
-
-if (.mfh_not_executed || .mfh_re_all_zero) {
-  cat("*Skipped -- MFH random effects are unavailable for this run.*\n")
-} else {
-  plot_qq(normality_long, "MFH", 2013, "Random effect")
-}
-
-
-plot_density(normality_long, 2012, "Residual")
-
-
-plot_density(normality_long, 2013, "Residual")
-
-
-if (.mfh_not_executed || .mfh_re_all_zero) {
-  cat("*Skipped -- MFH random effects are unavailable for this run.*\n")
-} else {
-  plot_density(normality_long, 2012, "Random effect")
-}
-
-
-if (.mfh_not_executed || .mfh_re_all_zero) {
-  cat("*Skipped -- MFH random effects are unavailable for this run.*\n")
-} else {
-  plot_density(normality_long, 2013, "Random effect")
-}
-
-
-plot_metric_comparison(2012, "rate", include_direct = TRUE)
-
-
-plot_metric_comparison(2012, "rate", include_direct = FALSE)
-
-
-plot_metric_comparison(2012, "mse", include_direct = TRUE)
-
-
-plot_metric_comparison(2012, "mse", include_direct = FALSE)
-
-
-plot_metric_comparison(2012, "rmse", include_direct = TRUE)
-
-
-plot_metric_comparison(2012, "rmse", include_direct = FALSE)
-
-
-plot_metric_comparison(2012, "cv", include_direct = TRUE)
-
-
-plot_metric_comparison(2012, "cv", include_direct = FALSE)
-
-
-plot_metric_comparison(2013, "rate", include_direct = TRUE)
-
-
-plot_metric_comparison(2013, "rate", include_direct = FALSE)
-
-
-plot_metric_comparison(2013, "mse", include_direct = TRUE)
-
-
-plot_metric_comparison(2013, "mse", include_direct = FALSE)
-
-
-plot_metric_comparison(2013, "rmse", include_direct = TRUE)
-
-
-plot_metric_comparison(2013, "rmse", include_direct = FALSE)
-
-
-plot_metric_comparison(2013, "cv", include_direct = TRUE)
-
-
-plot_metric_comparison(2013, "cv", include_direct = FALSE)
 
 
 plot_poverty_map <- function(col_name, method_label, year_val) {
@@ -1010,64 +1010,23 @@ plot_rmse_map <- function(col_name, method_label, year_val) {
 }
 
 
-plot_poverty_map("Direct", "Direct Map", 2012)
-
-
-plot_poverty_map("Direct", "Direct Map", 2013)
-
-
-plot_poverty_map("FH", "FH Map", 2012)
-
-
-plot_poverty_map("FH", "FH Map", 2013)
-
-
-plot_poverty_map("FH_Bench", "FH Benchmarked Map", 2012)
-
-
-plot_poverty_map("FH_Bench", "FH Benchmarked Map", 2013)
-
-
-plot_poverty_map("MFH", "MFH Map", 2012)
-
-
-plot_poverty_map("MFH", "MFH Map", 2013)
-
-
-plot_poverty_map("MFH_Bench", "MFH Benchmarked Map", 2012)
-
-
-plot_poverty_map("MFH_Bench", "MFH Benchmarked Map", 2013)
-
-
-plot_rmse_map("Direct", "Direct", 2012)
-
-
-plot_rmse_map("Direct", "Direct", 2013)
-
-
-plot_rmse_map("FH", "FH", 2012)
-
-
-plot_rmse_map("FH", "FH", 2013)
-
-
-plot_rmse_map("FH_Bench", "FH Benchmarked", 2012)
-
-
-plot_rmse_map("FH_Bench", "FH Benchmarked", 2013)
-
-
-plot_rmse_map("MFH", "MFH", 2012)
-
-
-plot_rmse_map("MFH", "MFH", 2013)
-
-
-plot_rmse_map("MFH_Bench", "MFH Benchmarked", 2012)
-
-
-plot_rmse_map("MFH_Bench", "MFH Benchmarked", 2013)
+.display_map_specs <- list(
+  list(col = "Direct",    label = "Direct Map"),
+  list(col = "FH",        label = "FH Map"),
+  list(col = "FH_Bench",  label = "FH Benchmarked Map")
+)
+if (!.mfh_not_executed) {
+  .display_map_specs <- c(.display_map_specs, list(
+    list(col = "MFH",       label = "MFH Map"),
+    list(col = "MFH_Bench", label = "MFH Benchmarked Map")
+  ))
+}
+for (.spec in .display_map_specs) {
+  for (.yr in years_keep) {
+    plot_poverty_map(.spec$col, .spec$label, .yr)
+    plot_rmse_map(.spec$col, gsub(" Map$", "", .spec$label), .yr)
+  }
+}
 
 
 if (.mfh_not_executed) {
@@ -1103,7 +1062,7 @@ plot_significance <- function(data, method_name) {
     geom_errorbar(aes(ymin = lb, ymax = ub), width = 0.25, alpha = 0.5) +
     scale_color_manual(values = c("Not Significant" = "gray60", "Significant" = "red")) +
     labs(
-      title = paste("Poverty changes (2013 - 2012):", method_name),
+      title = paste(sprintf("Poverty changes (%s - %s):", years_keep[2], years_keep[1]), method_name),
       x = "Domain",
       y = "Estimated change",
       color = "Status"

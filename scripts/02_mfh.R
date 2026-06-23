@@ -251,7 +251,7 @@ var_map <- list(
   year     = "year",      # survey year
   domain   = "prov",      # small area / domain identifier
   psu      = "ea_id",     # primary sampling unit
-  weight   = "weight",    # survey weights
+  weight   = "weight",    # household survey weights
   hh_size  = "hhsize",    # household size for population weights
   welfare  = "income",    # welfare aggregate
   povline  = "povline",   # poverty line
@@ -286,6 +286,14 @@ if (!identical(indicator_type, "poverty") && !"povline" %in% names(survey_dt)) {
 if (povline_type == "numeric") {
   survey_dt$povline <- as.numeric(povline_cfg)
 }
+survey_dt <- sae_add_population_weight(
+  survey_dt,
+  weight_col = "weight",
+  hh_size_col = "hh_size",
+  output_col = "population_weight",
+  context = "MFH direct estimation"
+)
+cat("MFH direct estimates use population_weight = weight * hh_size.\n")
 
 # Rename region column if present in survey data (needed for benchmarking)
 if (var_map$region %in% colnames(survey_dt) && var_map$region != "region") {
@@ -502,10 +510,11 @@ survey_step1 <- survey_dt %>%
   )
 
 # ---- Define Survey Design ----
-# Using the canonical PSU and weight names defined in Step 0
+# Direct poverty/indicator estimates are person-weighted by expanding each
+# sampled household by household size: population_weight = weight * hh_size.
 des <- svydesign(
   ids     = ~psu,
-  weights = ~weight,
+  weights = ~population_weight,
   data    = survey_step1
 ) 
 
@@ -520,7 +529,7 @@ dir_est_domain_long <- svyby(
 ) %>%
   mutate(mse = se^2)
 
-# When fitting on the log scale we additionally compute the survey-
+# When fitting on the log scale we additionally compute the population-
 # weighted arithmetic mean of welfare per domain-year. This anchors the
 # back-transform so the exported direct_rate equals svymean(welfare)
 # exactly and FH/MFH EBLUPs are scaled by the same per-domain factor.
@@ -1837,7 +1846,7 @@ if (!do_benchmark || is.null(bench_result)) {
 
 
 # ---- Back-transform from log to original scale (mean welfare only) ----
-# Per-domain-year smearing anchored to the survey-weighted arithmetic
+# Per-domain-year smearing anchored to the population-weighted arithmetic
 # mean of welfare:
 #   smear_dt = direct_arith_dt / exp(direct_rate_log_dt)
 # This guarantees the exported direct_rate equals svymean(welfare) exactly
@@ -1871,7 +1880,7 @@ if (identical(indicator_type, "mean_welfare") && isTRUE(log_transform)) {
   )]
   smear_vec[is.na(smear_vec)] <- 1
   # `smear_full` is the bc_sm (Duan smearing) factor anchored to the
-  # survey-weighted arithmetic mean. We always use it for `direct_rate`
+  # population-weighted arithmetic mean. We always use it for `direct_rate`
   # so the Direct column equals svymean(welfare) by construction
   # (matching the UI promise) regardless of the user's bias-correction
   # choice for the MODEL EBLUPs. The choice only affects MFH/UFH/Bench

@@ -37,6 +37,46 @@ sae_pick_col <- function(nms, candidates) {
   if (length(hit) == 0) NULL else nms[hit[1]]
 }
 
+sae_add_population_weight <- function(survey_data,
+                                      weight_col = "weight",
+                                      hh_size_col = "hh_size",
+                                      output_col = "population_weight",
+                                      context = "estimation") {
+  missing <- c(weight_col, hh_size_col)[!c(weight_col, hh_size_col) %in% names(survey_data)]
+  if (length(missing) > 0) {
+    stop(
+      "Population-weighted ", context, " requires ",
+      "population_weight = ", weight_col, " * ", hh_size_col, ". ",
+      "Missing required survey column(s): ",
+      paste(missing, collapse = ", "),
+      ". Map the household-size variable in the app."
+    )
+  }
+
+  w <- suppressWarnings(as.numeric(survey_data[[weight_col]]))
+  h <- suppressWarnings(as.numeric(survey_data[[hh_size_col]]))
+  pop_weight <- w * h
+  bad <- !is.finite(pop_weight) | pop_weight <= 0
+  if (all(bad)) {
+    stop(
+      "Population-weighted ", context, " could not proceed because all ",
+      "computed population weights are missing, non-finite, or non-positive. ",
+      "Check ", weight_col, " and ", hh_size_col, "."
+    )
+  }
+  if (any(bad)) {
+    stop(
+      "Population-weighted ", context, " found ",
+      sum(bad), " row(s) with missing, non-finite, or non-positive ",
+      "population_weight = ", weight_col, " * ", hh_size_col, ". ",
+      "Please clean the weight and household-size columns before running."
+    )
+  }
+
+  survey_data[[output_col]] <- pop_weight
+  survey_data
+}
+
 sae_validate_population_matrix <- function(mat, label = "Population") {
   bad <- !is.finite(mat) | mat <= 0
   if (any(bad)) {

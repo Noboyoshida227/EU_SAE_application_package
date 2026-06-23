@@ -159,6 +159,14 @@ if (identical(indicator_type, "poverty") && povline_type == "numeric") {
 if (!identical(indicator_type, "poverty") && !"povline" %in% names(survey_all)) {
   survey_all$povline <- NA_real_
 }
+survey_all <- sae_add_population_weight(
+  survey_all,
+  weight_col = "weight",
+  hh_size_col = "hh_size",
+  output_col = "population_weight",
+  context = "UFH direct estimation"
+)
+cat("UFH direct estimates use population_weight = weight * hh_size.\n")
 
 rhs_dt_raw <- rhs_dt_raw %>% rename(domain = !!var_map$domain)
 shp_dt     <- shp_dt     %>% rename(domain = !!var_map$domain)
@@ -439,7 +447,9 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
   }
 
   # ---- Direct estimation ----
-  design_obj <- survey::svydesign(ids = ~psu, weights = ~weight, data = survey_dt)
+  # Direct poverty/indicator estimates are person-weighted by expanding each
+  # sampled household by household size: population_weight = weight * hh_size.
+  design_obj <- survey::svydesign(ids = ~psu, weights = ~population_weight, data = survey_dt)
   var_dt <- survey::svyby(~pov_indicator, by = ~domain, design = design_obj,
                           FUN = survey::svymean, na.rm = TRUE)
 
@@ -449,9 +459,9 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
            CV = SD / abs(direct_povrate)) |>
     merge(sampsize_dt, by = "domain")
 
-  # When fitting on the log scale we additionally compute the survey-
+  # When fitting on the log scale we additionally compute the population-
   # weighted arithmetic mean of welfare per domain. This is what the UI
-  # promises ("Mean welfare = survey-weighted mean of welfare") and is
+  # promises ("Mean welfare = population-weighted mean of welfare") and is
   # used to anchor the per-domain smearing in the back-transform: with
   # smear_d = direct_arith_d / exp(direct_povrate_d), the back-transformed
   # Direct column equals svymean(welfare) exactly, and FH/FH_Bench EBLUPs
@@ -657,7 +667,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
 
   # ---- Back-transform from log to original scale (mean welfare only) ----
   # When bias correction is ON (bc_sm, the default), we use a per-domain
-  # smearing factor anchored to the survey-weighted arithmetic mean welfare:
+  # smearing factor anchored to the population-weighted arithmetic mean welfare:
   #   smear_d  = direct_arith_d / exp(direct_povrate_d)
   # so the FH/FH_Bench EBLUPs target the arithmetic mean (Duan-style
   # smearing). Variance is propagated by the delta method using the
@@ -667,7 +677,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
   # When bias correction is OFF (user explicitly picked "none"), we
   # set smear_d = 1, which makes FH/FH_Bench = exp(Î·Ì‚) -- the naive,
   # downward-biased back-transform. The Direct column is still
-  # replaced with the survey-weighted arithmetic mean of welfare
+  # replaced with the population-weighted arithmetic mean of welfare
   # because that quantity is unbiased and identifies "mean welfare"
   # by definition; the user is opting out of bias correction for the
   # MODEL EBLUP, not redefining what "Direct" means.
@@ -711,7 +721,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
       if (!col %in% names(pov_fh)) next
       eta <- pov_fh[[col]]
       if (col == "Direct") {
-        # Replace with the actual arithmetic weighted mean and its variance
+        # Replace with the actual population-weighted arithmetic mean and its variance
         pov_fh[[col]] <- pov_fh$direct_arith
         if (mse_col %in% names(pov_fh)) {
           pov_fh[[mse_col]] <- (pov_fh$SD_arith)^2

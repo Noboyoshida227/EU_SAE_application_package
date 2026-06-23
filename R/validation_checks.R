@@ -175,7 +175,7 @@ validate_inputs <- function(survey_data, aux_data) {
 #' Assess data readiness for UFH / MFH analysis
 #'
 #' @param survey_data  Harmonised household survey data.frame
-#'   (columns: domain, year, welfare, povline, weight, psu)
+#'   (columns: domain, year, welfare, povline, weight, hh_size, psu)
 #' @param aux_data     Domain-level auxiliary covariates data.frame
 #'   (columns: domain, year, plus numeric covariates)
 #' @param geo_data     Geometry / spatial data.frame or sf object
@@ -233,6 +233,33 @@ assess_data_readiness <- function(survey_data,
                                  survey_data$povline)^fgt_alpha
   }
 
+  missing_weight_cols <- setdiff(c("weight", "hh_size"), names(survey_data))
+  if (length(missing_weight_cols) > 0) {
+    msgs <- c(msgs, sprintf(
+      "Test 0c: ERROR -- Direct %s estimation requires population_weight = weight * household size. Missing required column(s): %s.",
+      fgt_noun,
+      paste(missing_weight_cols, collapse = ", ")
+    ))
+    survey_data$analysis_weight <- NA_real_
+  } else {
+    survey_data$analysis_weight <- suppressWarnings(
+      as.numeric(survey_data$weight) * as.numeric(survey_data$hh_size)
+    )
+    bad_weight <- !is.finite(survey_data$analysis_weight) |
+      survey_data$analysis_weight <= 0
+    if (any(bad_weight)) {
+      msgs <- c(msgs, sprintf(
+        "Test 0c: ERROR -- %d row(s) have missing, non-finite, or non-positive population_weight = weight * household size.",
+        sum(bad_weight)
+      ))
+      survey_data$analysis_weight[bad_weight] <- NA_real_
+    } else {
+      msgs <- c(msgs,
+        "Test 0c: Direct estimates will use population_weight = weight * household size."
+      )
+    }
+  }
+
   years <- sort(unique(survey_data$year))
 
   # Domain-level target (weighted) per year. Column is named `poverty_rate`
@@ -251,9 +278,9 @@ assess_data_readiness <- function(survey_data,
     )
     for (i in seq_along(domains)) {
       dd <- sv[sv$domain == domains[i], ]
-      ok <- !is.na(dd$poor) & !is.na(dd$weight)
+      ok <- !is.na(dd$poor) & !is.na(dd$analysis_weight)
       out$poverty_rate[i] <- if (any(ok)) {
-        stats::weighted.mean(dd$poor[ok], dd$weight[ok])
+        stats::weighted.mean(dd$poor[ok], dd$analysis_weight[ok])
       } else NA_real_
       out$n_obs[i] <- nrow(dd)
     }
@@ -403,9 +430,9 @@ assess_data_readiness <- function(survey_data,
 
   # ------------------------------------------------------------------
   # Test 4. National headline statistic, indicator-aware:
-  #   - poverty:               weighted mean of `poor` (FGT(0))
-  #   - mean welfare:          weighted mean of `welfare`
-  #   - mean welfare (log fit): weighted mean of log(welfare) for w > 0
+  #   - poverty:               population-weighted mean of `poor` (FGT)
+  #   - mean welfare:          population-weighted mean of `welfare`
+  #   - mean welfare (log fit): population-weighted mean of log(welfare) for w > 0
   # Previously this always used `sv$poor` regardless of indicator,
   # which produced NA for mean_welfare runs (the `poor` column is
   # absent or empty when no poverty line is configured).
@@ -425,9 +452,9 @@ assess_data_readiness <- function(survey_data,
     } else {
       sv$poor
     }
-    nat <- if (any(!is.na(target) & !is.na(sv$weight))) {
-      ok <- !is.na(target) & !is.na(sv$weight)
-      stats::weighted.mean(target[ok], sv$weight[ok])
+    nat <- if (any(!is.na(target) & !is.na(sv$analysis_weight))) {
+      ok <- !is.na(target) & !is.na(sv$analysis_weight)
+      stats::weighted.mean(target[ok], sv$analysis_weight[ok])
     } else {
       NA_real_
     }
