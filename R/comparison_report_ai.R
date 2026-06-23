@@ -60,24 +60,38 @@ load_comparison_ai_data <- function() {
   pov_fh <- readxl::read_excel("outputs/data/pov_fh.xlsx")
   pov_mfh <- readxl::read_excel("outputs/data/pov_mfh.xlsx")
 
+  pick_first <- function(nms, pattern) {
+    hit <- grep(pattern, nms, value = TRUE)
+    if (length(hit) == 0) NULL else hit[1]
+  }
+  mfh_rate_col <- pick_first(names(pov_mfh), "^rate_MFH[123]$")
+  mfh_mse_col  <- pick_first(names(pov_mfh), "^mse_MFH[123]$")
+  mfh_cv_col   <- pick_first(names(pov_mfh), "^cv_MFH[123]$")
+  if (is.null(mfh_rate_col) || is.null(mfh_mse_col) || is.null(mfh_cv_col)) {
+    stop("Could not identify the selected MFH estimate columns in pov_mfh.xlsx.")
+  }
+  benchmark_enabled <- "rate_Bench" %in% names(pov_mfh) ||
+    (all(c("FH_Bench", "FH") %in% names(pov_fh)) &&
+       any(abs(pov_fh$FH_Bench - pov_fh$FH) > 1e-12, na.rm = TRUE))
+
   comparison_dt <- dplyr::left_join(
     dplyr::transmute(
       pov_mfh,
-      domain = as.integer(domain),
+      domain = trimws(as.character(domain)),
       year = as.integer(year),
       Direct = direct_rate,
       Direct_MSE = direct_mse,
       Direct_CV = direct_cv,
-      MFH = rate_MFH2,
-      MFH_MSE = mse_MFH2,
-      MFH_CV = cv_MFH2,
-      MFH_Bench = if ("rate_Bench" %in% names(pov_mfh)) rate_Bench else rate_MFH2,
-      MFH_Bench_MSE = if ("mse_Bench" %in% names(pov_mfh)) mse_Bench else mse_MFH2,
-      MFH_Bench_CV = if ("cv_Bench" %in% names(pov_mfh)) cv_Bench else cv_MFH2
+      MFH = .data[[mfh_rate_col]],
+      MFH_MSE = .data[[mfh_mse_col]],
+      MFH_CV = .data[[mfh_cv_col]],
+      MFH_Bench = if ("rate_Bench" %in% names(pov_mfh)) rate_Bench else .data[[mfh_rate_col]],
+      MFH_Bench_MSE = if ("mse_Bench" %in% names(pov_mfh)) mse_Bench else .data[[mfh_mse_col]],
+      MFH_Bench_CV = if ("cv_Bench" %in% names(pov_mfh)) cv_Bench else .data[[mfh_cv_col]]
     ),
     dplyr::transmute(
       pov_fh,
-      domain = as.integer(domain),
+      domain = trimws(as.character(domain)),
       year = as.integer(year),
       FH = FH,
       FH_MSE = FH_MSE,
@@ -99,14 +113,23 @@ load_comparison_ai_data <- function() {
   )
 
   sig_fh <- utils::read.csv("outputs/tables/statistical_significance_results_unbench.csv")
-  sig_fh_bench <- utils::read.csv("outputs/tables/statistical_significance_results.csv")
+  sig_fh_bench <- if (file.exists("outputs/tables/statistical_significance_results.csv")) {
+    utils::read.csv("outputs/tables/statistical_significance_results.csv")
+  } else NULL
   sig_mfh <- utils::read.csv("outputs/tables/comparison_final.csv")
-  sig_mfh_bench <- utils::read.csv("outputs/tables/comparison_final_bench.csv")
+  sig_mfh_bench <- if (file.exists("outputs/tables/comparison_final_bench.csv")) {
+    utils::read.csv("outputs/tables/comparison_final_bench.csv")
+  } else NULL
 
   prepare_sig_tbl_local <- function(df, method_label, signif_true = c("TRUE", "Significant")) {
+    if (is.null(df)) return(data.frame(
+      domain = character(), diff = numeric(), mse = numeric(),
+      lb = numeric(), ub = numeric(), significant = logical(),
+      method = character()
+    ))
     dplyr::transmute(
       df,
-      domain = as.integer(domain),
+      domain = trimws(as.character(domain)),
       diff = as.numeric(diff),
       mse = as.numeric(mse),
       lb = as.numeric(lb),
@@ -116,12 +139,17 @@ load_comparison_ai_data <- function() {
     )
   }
 
-  sig_plot_dt <- dplyr::bind_rows(
+  sig_inputs <- list(
     prepare_sig_tbl_local(sig_fh, "FH"),
-    prepare_sig_tbl_local(sig_fh_bench, "FH Benchmarked"),
-    prepare_sig_tbl_local(sig_mfh, "MFH", signif_true = c("Significant")),
-    prepare_sig_tbl_local(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
+    prepare_sig_tbl_local(sig_mfh, "MFH", signif_true = c("Significant"))
   )
+  if (benchmark_enabled) {
+    sig_inputs <- c(sig_inputs, list(
+      prepare_sig_tbl_local(sig_fh_bench, "FH Benchmarked"),
+      prepare_sig_tbl_local(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
+    ))
+  }
+  sig_plot_dt <- dplyr::bind_rows(sig_inputs)
 
   normality_diag <- if (file.exists("outputs/tables/normality_diagnostics.csv")) {
     utils::read.csv("outputs/tables/normality_diagnostics.csv")

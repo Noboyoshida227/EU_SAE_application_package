@@ -107,6 +107,12 @@ survey_path <- cfg_or_default(ufh_cfg$survey_path, here::here("data", "pov_direc
 rhs_path    <- cfg_or_default(ufh_cfg$rhs_path,    here::here("data", "sae_data.rds"))
 shp_path    <- cfg_or_default(ufh_cfg$shp_path,    here::here("data", "geometries.rds"))
 population_path <- cfg_or_default(ufh_cfg$population_path, "")
+do_benchmark <- isTRUE(ufh_cfg$do_benchmark)
+benchmark_level <- cfg_or_default(
+  ufh_cfg$benchmark_level,
+  .app_cfg$benchmarking$level %||% "national"
+)
+if (!benchmark_level %in% c("national", "region")) benchmark_level <- "national"
 
 cat("UFH data paths:\n")
 cat("  survey:", survey_path, "\n")
@@ -125,7 +131,8 @@ survey_raw <- survey_raw %>% select(-any_of("provlab"))
 # ---- Variable name mapping (from config or defaults) ----
 default_var_map <- list(
   year = "year", domain = "prov", psu = "ea_id",
-  weight = "weight", hh_size = "hhsize",
+  weight = "weight", strata = "", hh_size = "hhsize",
+  region = "region",
   welfare = "income", povline = "povline", poor = "poor"
 )
 if (!is.null(ufh_cfg$var_map)) {
@@ -139,6 +146,14 @@ rename_cols <- c(
   year = var_map$year, domain = var_map$domain, psu = var_map$psu,
   weight = var_map$weight, welfare = var_map$welfare
 )
+if (!is.null(var_map$strata) && nzchar(var_map$strata) &&
+    var_map$strata %in% names(survey_raw) && var_map$strata != "strata") {
+  rename_cols <- c(rename_cols, strata = var_map$strata)
+}
+if (!is.null(var_map$region) && nzchar(var_map$region) &&
+    var_map$region %in% names(survey_raw) && var_map$region != "region") {
+  rename_cols <- c(rename_cols, region = var_map$region)
+}
 # Only rename povline column when it comes from data and we are running
 # the poverty indicator. Mean-welfare runs ignore the poverty line entirely.
 if (identical(indicator_type, "poverty") &&
@@ -167,13 +182,45 @@ survey_all <- sae_add_population_weight(
   context = "UFH direct estimation"
 )
 cat("UFH direct estimates use population_weight = weight * hh_size.\n")
+survey_all <- survey_all %>%
+  mutate(domain = trimws(as.character(domain)))
+if ("region" %in% names(survey_all)) {
+  survey_all <- survey_all %>%
+    mutate(region = trimws(as.character(region)))
+}
 
-rhs_dt_raw <- rhs_dt_raw %>% rename(domain = !!var_map$domain)
-shp_dt     <- shp_dt     %>% rename(domain = !!var_map$domain)
+rhs_domain_col <- cfg_or_default(ufh_cfg$rhs_domain, var_map$domain)
+shp_domain_col <- cfg_or_default(ufh_cfg$shp_domain, var_map$domain)
+rhs_year_col <- if (!is.null(var_map$year) && var_map$year %in% names(rhs_dt_raw)) {
+  var_map$year
+} else {
+  "year"
+}
+
+rhs_dt_raw <- rhs_dt_raw %>%
+  rename(domain = all_of(rhs_domain_col)) %>%
+  { if (rhs_year_col != "year" && rhs_year_col %in% names(.)) rename(., year = all_of(rhs_year_col)) else . } %>%
+  mutate(domain = trimws(as.character(domain)))
+shp_dt     <- shp_dt %>%
+  rename(domain = all_of(shp_domain_col)) %>%
+  mutate(domain = trimws(as.character(domain)))
 
 # ---- Analysis years (from config or defaults) ----
 years_keep <- as.integer(cfg_or_default(ufh_cfg$years_keep, c(2012L, 2013L)))
 cat("Analysis years:", paste(years_keep, collapse = ", "), "\n")
+missing_survey_years <- setdiff(years_keep, sort(unique(as.integer(survey_all$year))))
+missing_rhs_years <- setdiff(years_keep, sort(unique(as.integer(rhs_dt_raw$year))))
+if (length(missing_survey_years) > 0 || length(missing_rhs_years) > 0) {
+  stop(
+    "Requested analysis years are not available. ",
+    "Requested: ", paste(years_keep, collapse = ", "),
+    ". Missing in survey: ",
+    if (length(missing_survey_years) > 0) paste(missing_survey_years, collapse = ", ") else "none",
+    ". Missing in auxiliary covariates: ",
+    if (length(missing_rhs_years) > 0) paste(missing_rhs_years, collapse = ", ") else "none",
+    "."
+  )
+}
 
 # ---- Transformation and bias correction (from config or defaults) ----
 ufh_transformation <- cfg_or_default(ufh_cfg$transformation, "arcsin")
@@ -359,10 +406,40 @@ fh_results_list <- list()
 
 .use_eur_plots <- identical(indicator_type, "mean_welfare") && isTRUE(log_transform)
 
-# ---- Province-to-region mapping (derived from survey_all) ----
-region_map <- survey_all |>
-  select(domain, region) |>
-  distinct()
+make_sae_design <- function(data) {
+  if ("strata" %in% names(data) && any(!is.na(data$strata))) {
+    survey::svydesign(
+      ids = ~psu,
+      strata = ~strata,
+      weights = ~population_weight,
+      data = data,
+      nest = TRUE
+    )
+  } else {
+    survey::svydesign(ids = ~psu, weights = ~population_weight, data = data)
+  }
+}
+
+# ---- Benchmark grouping map ----------------------------------------------
+if (do_benchmark) {
+  if (identical(benchmark_level, "national")) {
+    region_map <- survey_all |>
+      select(domain) |>
+      distinct() |>
+      mutate(region = "national")
+  } else if ("region" %in% names(survey_all)) {
+    region_map <- survey_all |>
+      select(domain, region) |>
+      distinct()
+  } else {
+    stop("Regional benchmarking requires a mapped region column in the survey data. ",
+         "Choose national benchmarking or map the region variable.")
+  }
+  cat("UFH benchmarking enabled at level:", benchmark_level, "\n")
+} else {
+  region_map <- NULL
+  cat("UFH benchmarking disabled by configuration.\n")
+}
 
 # ---- Invalidate stale UFH output artifacts -------------------------------
 # If a previous UFH render failed mid-way, its output files from an even
@@ -408,6 +485,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
                         backtransformation = "bc",
                         formula_override = NULL,
                         var_choice = "sm_out",
+                        do_benchmark = FALSE,
                         population_path = "") {
 
   # Back-transformation is only meaningful under arcsin. If the caller passes
@@ -449,7 +527,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
   # ---- Direct estimation ----
   # Direct poverty/indicator estimates are person-weighted by expanding each
   # sampled household by household size: population_weight = weight * hh_size.
-  design_obj <- survey::svydesign(ids = ~psu, weights = ~population_weight, data = survey_dt)
+  design_obj <- make_sae_design(survey_dt)
   var_dt <- survey::svyby(~pov_indicator, by = ~domain, design = design_obj,
                           FUN = survey::svymean, na.rm = TRUE)
 
@@ -615,55 +693,69 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
        B                  = .(.B_fh))
   ))
 
-  # ---- Regional benchmarking ----
-  # Each region's target = population-weighted average of direct province rates.
-  # A per-region ratio factor is applied so that the weighted mean of the
-  # benchmarked FH estimates within every region equals that region's target.
-  population_mat <- sae_resolve_population_matrix(
-    population_path = population_path,
-    survey_data = survey_all,
-    domain_vec = fh_dt$Domain,
-    years_keep = years_keep,
-    hh_size_col = "hh_size",
-    context = paste0("UFH year ", yr)
-  )
-  pop_dt <- tibble::tibble(
-    domain = fh_dt$Domain,
-    Nd = as.numeric(population_mat[as.character(fh_dt$Domain), as.character(yr)])
-  )
-
+  fh_bench <- NULL
+  pop_dt <- NULL
   fh_dt <- fh_dt |> rename(domain = Domain)
-  fh_dt <- fh_dt |>
-    left_join(pop_dt |> mutate(ratio_n = Nd / sum(Nd)), by = "domain") |>
-    left_join(region_map, by = "domain")
-
-  # Region-level benchmarks: weighted avg of direct province poverty rates
-  region_benchmarks <- fh_dt |>
-    filter(!is.na(direct_povrate)) |>
-    group_by(region) |>
-    summarize(
-      n_provs = n(),
-      B_r     = weighted.mean(direct_povrate, Nd, na.rm = TRUE),
-      .groups = "drop"
+  if (do_benchmark) {
+    # ---- Regional/national benchmarking ----
+    # Each benchmark group's target = population-weighted average of direct
+    # domain rates. A per-group ratio factor is applied so that the weighted
+    # mean of benchmarked FH estimates equals that target.
+    population_mat <- sae_resolve_population_matrix(
+      population_path = population_path,
+      survey_data = survey_all,
+      domain_vec = fh_dt$domain,
+      years_keep = years_keep,
+      hh_size_col = "hh_size",
+      context = paste0("UFH year ", yr)
     )
-  cat("\nRegional benchmark poverty rates (yr =", yr, "):\n")
-  print(region_benchmarks)
+    pop_dt <- tibble::tibble(
+      domain = fh_dt$domain,
+      Nd = as.numeric(population_mat[as.character(fh_dt$domain), as.character(yr)])
+    )
 
-  # Apply regional ratio-adjustment
-  region_df <- fh_dt |> select(domain, region, Nd, direct_povrate)
-  fh_bench  <- bench_regional(
-    model = fh_model,
-    region_df = region_df,
-    MSE = TRUE,
-    B = 200,
-    seed = 123
-  )
+    fh_dt <- fh_dt |>
+      left_join(pop_dt |> mutate(ratio_n = Nd / sum(Nd)), by = "domain") |>
+      left_join(region_map, by = "domain")
+
+    # Benchmark-level targets: weighted avg of direct domain rates
+    region_benchmarks <- fh_dt |>
+      filter(!is.na(direct_povrate)) |>
+      group_by(region) |>
+      summarize(
+        n_provs = n(),
+        B_r     = weighted.mean(direct_povrate, Nd, na.rm = TRUE),
+        .groups = "drop"
+      )
+    cat("\nUFH benchmark targets (yr =", yr, "):\n")
+    print(region_benchmarks)
+
+    region_df <- fh_dt |> select(domain, region, Nd, direct_povrate)
+    fh_bench  <- bench_regional(
+      model = fh_model,
+      region_df = region_df,
+      MSE = TRUE,
+      B = 200,
+      seed = 123
+    )
+
+    pov_fh <- as.data.frame(estimators(fh_bench, MSE = TRUE, CV = TRUE))
+  } else {
+    pov_fh <- as.data.frame(estimators(fh_model, MSE = TRUE, CV = TRUE))
+  }
 
   # ---- Prepare results ----
-  pov_fh <- as.data.frame(estimators(fh_bench, MSE = TRUE, CV = TRUE))
   pov_fh <- pov_fh |>
     rename(domain := "Domain") |>
     mutate(year := yr)
+  if (!do_benchmark) {
+    pov_fh$FH_Bench <- pov_fh$FH
+    pov_fh$FH_Bench_MSE <- pov_fh$FH_MSE
+    pov_fh$FH_Bench_CV <- pov_fh$FH_CV
+    attr(pov_fh, "benchmarking_applied") <- FALSE
+  } else {
+    attr(pov_fh, "benchmarking_applied") <- TRUE
+  }
 
   # ---- Back-transform from log to original scale (mean welfare only) ----
   # When bias correction is ON (bc_sm, the default), we use a per-domain
@@ -749,7 +841,8 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
     # delta-method propagated value from the log-scale bootstrap -- that
     # is an approximation; redoing the bootstrap on the EUR scale is on
     # the future-work list.
-    if ("FH" %in% names(pov_fh) && "FH_Bench" %in% names(pov_fh)) {
+    if (do_benchmark && !is.null(region_map) &&
+        "FH" %in% names(pov_fh) && "FH_Bench" %in% names(pov_fh)) {
       reg_lookup <- .direct_norm |>
         dplyr::left_join(region_map, by = "domain") |>
         dplyr::left_join(pop_dt, by = "domain") |>
@@ -926,6 +1019,7 @@ res_y1 <- run_fh_year(yr = years_keep[1],
                       backtransformation = ufh_backtrans_method,
                       formula_override = ufh_formula_override_y1,
                       var_choice = ufh_var_choice,
+                      do_benchmark = do_benchmark,
                       population_path = population_path)
 
 fh_results_list[[as.character(years_keep[1])]] <- res_y1$pov_fh
@@ -1187,6 +1281,7 @@ res_y2 <- run_fh_year(yr = years_keep[2],
                       backtransformation = ufh_backtrans_method,
                       formula_override = ufh_formula_override_y2,
                       var_choice = ufh_var_choice,
+                      do_benchmark = do_benchmark,
                       population_path = population_path)
 
 fh_results_list[[as.character(years_keep[2])]] <- res_y2$pov_fh

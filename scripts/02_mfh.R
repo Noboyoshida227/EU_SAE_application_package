@@ -252,6 +252,7 @@ var_map <- list(
   domain   = "prov",      # small area / domain identifier
   psu      = "ea_id",     # primary sampling unit
   weight   = "weight",    # household survey weights
+  strata   = "",          # optional strata ID
   hh_size  = "hhsize",    # household size for population weights
   welfare  = "income",    # welfare aggregate
   povline  = "povline",   # poverty line
@@ -268,6 +269,10 @@ rename_cols_mfh <- c(
   year = var_map$year, domain = var_map$domain, psu = var_map$psu,
   weight = var_map$weight, welfare = var_map$welfare
 )
+if (!is.null(var_map$strata) && nzchar(var_map$strata) &&
+    var_map$strata %in% names(survey_raw) && var_map$strata != "strata") {
+  rename_cols_mfh <- c(rename_cols_mfh, strata = var_map$strata)
+}
 if (identical(indicator_type, "poverty") &&
     povline_type == "column" && !is.null(var_map$povline)) {
   rename_cols_mfh <- c(rename_cols_mfh, povline = var_map$povline)
@@ -294,25 +299,52 @@ survey_dt <- sae_add_population_weight(
   context = "MFH direct estimation"
 )
 cat("MFH direct estimates use population_weight = weight * hh_size.\n")
+survey_dt <- survey_dt %>%
+  mutate(domain = trimws(as.character(domain)))
 
 # Rename region column if present in survey data (needed for benchmarking)
 if (var_map$region %in% colnames(survey_dt) && var_map$region != "region") {
   survey_dt <- survey_dt %>% rename(region = !!var_map$region)
 }
+if ("region" %in% names(survey_dt)) {
+  survey_dt <- survey_dt %>% mutate(region = trimws(as.character(region)))
+}
 
 rhs_domain_col <- cfg_or_default(mfh_cfg$rhs_domain, "prov")
 shp_domain_col <- cfg_or_default(mfh_cfg$shp_domain, "prov")
 
+rhs_year_col <- if (!is.null(var_map$year) && var_map$year %in% names(rhs_dt)) {
+  var_map$year
+} else {
+  "year"
+}
+
 rhs_dt <- rhs_dt %>%
-  rename(domain = all_of(rhs_domain_col))
+  rename(domain = all_of(rhs_domain_col)) %>%
+  { if (rhs_year_col != "year" && rhs_year_col %in% names(.)) rename(., year = all_of(rhs_year_col)) else . } %>%
+  mutate(domain = trimws(as.character(domain)))
 
 shp_dt <- shp_dt %>%
-  rename(domain = all_of(shp_domain_col))
+  rename(domain = all_of(shp_domain_col)) %>%
+  mutate(domain = trimws(as.character(domain)))
 
 # ---- Analysis years ----
 years_keep <- c(2012L, 2013L)
 if (!is.null(mfh_cfg$years_keep) && length(mfh_cfg$years_keep) == 2) {
   years_keep <- sort(as.integer(unlist(mfh_cfg$years_keep)))
+}
+missing_survey_years <- setdiff(years_keep, sort(unique(as.integer(survey_dt$year))))
+missing_rhs_years <- setdiff(years_keep, sort(unique(as.integer(rhs_dt$year))))
+if (length(missing_survey_years) > 0 || length(missing_rhs_years) > 0) {
+  stop(
+    "Requested analysis years are not available. ",
+    "Requested: ", paste(years_keep, collapse = ", "),
+    ". Missing in survey: ",
+    if (length(missing_survey_years) > 0) paste(missing_survey_years, collapse = ", ") else "none",
+    ". Missing in auxiliary covariates: ",
+    if (length(missing_rhs_years) > 0) paste(missing_rhs_years, collapse = ", ") else "none",
+    "."
+  )
 }
 
 # ---- Model configuration ----
@@ -378,10 +410,15 @@ mfh_candidate_vars_y2 <- validate_mfh_covs(mfh_candidate_vars_y2, "Year 2")
 # Per-year candidate vars are applied separately during variable selection
 
 # ---- Benchmarking configuration ----
-# Set to TRUE to apply regional benchmarking to MFH estimates
-# (consistent with UFH pipeline). Requires region and population data.
-do_benchmark <- isTRUE(mfh_cfg$do_benchmark) ||
-  cfg_or_default(mfh_cfg$do_benchmark, TRUE)
+# Set to TRUE to apply benchmarking to MFH estimates. The dashboard writes
+# this explicitly; missing values default to FALSE so old sample data are not
+# used accidentally.
+do_benchmark <- isTRUE(mfh_cfg$do_benchmark)
+benchmark_level <- cfg_or_default(
+  mfh_cfg$benchmark_level,
+  cfg$benchmarking$level %||% "national"
+)
+if (!benchmark_level %in% c("national", "region")) benchmark_level <- "national"
 bench_nB <- as.integer(cfg_or_default(mfh_cfg$bench_nB, 200))
 
 # Model selection criterion: "AIC" (default) or "BIC"
@@ -391,18 +428,25 @@ if (!mfh_ic_criterion %in% c("AIC", "BIC")) {
   mfh_ic_criterion <- "AIC"
 }
 
-# ---- Province-to-region mapping (derived from survey data) ----
-if ("region" %in% colnames(survey_dt)) {
-  region_map <- survey_dt %>%
-    select(domain, region) %>%
-    distinct()
+# ---- Benchmark grouping map (derived from survey data) ----
+if (do_benchmark) {
+  if (identical(benchmark_level, "national")) {
+    region_map <- survey_dt %>%
+      select(domain) %>%
+      distinct() %>%
+      mutate(region = "national")
+  } else if ("region" %in% colnames(survey_dt)) {
+    region_map <- survey_dt %>%
+      select(domain, region) %>%
+      distinct()
+  } else {
+    stop("Regional benchmarking requires a mapped region column in the survey data. ",
+         "Choose national benchmarking or map the region variable.")
+  }
+  cat("MFH benchmarking enabled at level:", benchmark_level, "\n")
 } else {
   region_map <- NULL
-  if (do_benchmark) {
-    message("Warning: 'region' column not found in survey data. ",
-            "Regional benchmarking will be skipped.")
-    do_benchmark <- FALSE
-  }
+  cat("MFH benchmarking disabled by configuration.\n")
 }
 
 # Source benchmarking functions for MFH
@@ -512,11 +556,21 @@ survey_step1 <- survey_dt %>%
 # ---- Define Survey Design ----
 # Direct poverty/indicator estimates are person-weighted by expanding each
 # sampled household by household size: population_weight = weight * hh_size.
-des <- svydesign(
-  ids     = ~psu,
-  weights = ~population_weight,
-  data    = survey_step1
-) 
+if ("strata" %in% names(survey_step1) && any(!is.na(survey_step1$strata))) {
+  des <- svydesign(
+    ids     = ~psu,
+    strata  = ~strata,
+    weights = ~population_weight,
+    data    = survey_step1,
+    nest    = TRUE
+  )
+} else {
+  des <- svydesign(
+    ids     = ~psu,
+    weights = ~population_weight,
+    data    = survey_step1
+  )
+}
 
 # ---- Direct estimates: Domain x Year ----
 dir_est_domain_long <- svyby(
@@ -576,7 +630,7 @@ dir_est_domain_all_years <- dir_est_domain_all_years %>%
 # ---- Store consolidated direct variances and sample sizes ----
 all_var_hat_domain_dt <- dir_est_domain_all_years %>%
   transmute(
-    domain      = as.integer(domain),
+    domain      = as.character(domain),
     v1          = .data[[mse_cols[1]]],
     v2          = .data[[mse_cols[2]]],
     !!N_cols[1] := .data[[N_cols[1]]],
@@ -633,7 +687,7 @@ var_smooth_long <- pmap_dfr(col_map, function(year, vcol, ncol) {
 
   out %>%
     transmute(
-      domain     = as.integer(Domain),
+      domain     = as.character(Domain),
       year       = as.integer(year),
       var_smooth = var_smooth
     )
@@ -751,7 +805,7 @@ covariances <- map_dfr(svyby_out, function(x) {
   }
 
   tibble(
-    domain = as.integer(x$domain),
+    domain = as.character(x$domain),
     v12_d  = as.numeric(v12)
   )
 })
@@ -1141,7 +1195,7 @@ vardir_cols
 .vardir_bad <- !is.finite(.vardir_mat)
 .bad_row_mask <- rowSums(.vardir_bad) > 0
 .n_bad_rows <- sum(.bad_row_mask)
-.excluded_domains <- if (.n_bad_rows > 0) domain_dt$domain[.bad_row_mask] else integer(0)
+.excluded_domains <- if (.n_bad_rows > 0) domain_dt$domain[.bad_row_mask] else character(0)
 .all_domains_dt <- domain_dt
 
 if (.n_bad_rows > 0) {
@@ -1290,7 +1344,7 @@ if (isTRUE(.model_fit_failed)) {
   .write_xlsx_safe(db_wide_all, here::here("outputs", "data", "pov_mfh.xlsx"))
 
   change_placeholder <- data.frame(
-    domain      = sort(unique(as.integer(db_wide_all$domain))),
+    domain      = sort(unique(as.character(db_wide_all$domain))),
     diff        = NA_real_,
     mse         = NA_real_,
     lb          = NA_real_,
@@ -1984,7 +2038,7 @@ if (identical(indicator_type, "mean_welfare") && isTRUE(log_transform)) {
                                       stringsAsFactors = FALSE)
     names(bench_pop_lookup) <- c("domain", "year", "Nd")
     bench_pop_lookup <- bench_pop_lookup %>%
-      mutate(domain = as.integer(domain), year = as.integer(year))
+      mutate(domain = as.character(domain), year = as.integer(year))
     bench_inputs <- db_wide_all %>%
       transmute(
         domain, year,
@@ -3414,7 +3468,16 @@ if (exists("comp12_bench_obj") && !is.null(comp12_bench_obj)) {
   }
   writexl::write_xlsx(df, path = path)
 }
-.write_xlsx_safe(db_wide_all, here::here("outputs", "data", "pov_mfh.xlsx"))
+.selected_mfh_cols <- paste0(
+  rep(c("rate_", "mse_", "cv_", "rmse_"), each = 1),
+  diag_model
+)
+.all_mfh_cols <- grep("^(rate|mse|cv|rmse)_MFH[123]$", names(db_wide_all),
+                      value = TRUE)
+.drop_mfh_cols <- setdiff(.all_mfh_cols, .selected_mfh_cols)
+.mfh_export <- db_wide_all %>%
+  select(-any_of(.drop_mfh_cols))
+.write_xlsx_safe(.mfh_export, here::here("outputs", "data", "pov_mfh.xlsx"))
 
 # ---- Display summary ----
 cat("Results exported successfully:\n")
@@ -3422,4 +3485,4 @@ cat("  - comparison_final.csv:", nrow(comparison_final), "domains\n")
 if (exists("comp12_bench_obj") && !is.null(comp12_bench_obj)) {
   cat("  - comparison_final_bench.csv:", nrow(comp12_bench_obj$df), "domains (benchmarked)\n")
 }
-cat("  - pov_mfh.xlsx:", nrow(db_wide_all), "domain-year combinations\n")
+cat("  - pov_mfh.xlsx:", nrow(.mfh_export), "domain-year combinations; selected model =", diag_model, "\n")

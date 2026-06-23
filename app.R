@@ -121,13 +121,69 @@ resolve_upload <- function(file_input, fallback = NULL) {
   normalizePath(file_input$datapath, winslash = "/", mustWork = TRUE)
 }
 
+validate_mapped_input_columns <- function(survey_raw, rhs_raw, var_map, rhs_domain,
+                                          povline_type = "column",
+                                          indicator_type = "poverty") {
+  survey_required <- c(
+    year = var_map$year,
+    domain = var_map$domain,
+    psu = var_map$psu,
+    weight = var_map$weight,
+    hh_size = var_map$hh_size,
+    welfare = var_map$welfare
+  )
+  if (identical(indicator_type, "poverty") && identical(povline_type, "column")) {
+    survey_required <- c(survey_required, povline = var_map$povline)
+  }
+  survey_required <- survey_required[!is.na(survey_required) & nzchar(survey_required)]
+  missing_survey <- survey_required[!survey_required %in% names(survey_raw)]
+
+  rhs_year <- if (!is.null(var_map$year) && var_map$year %in% names(rhs_raw)) {
+    var_map$year
+  } else {
+    "year"
+  }
+  rhs_required <- c(domain = rhs_domain, year = rhs_year)
+  rhs_required <- rhs_required[!is.na(rhs_required) & nzchar(rhs_required)]
+  missing_rhs <- rhs_required[!rhs_required %in% names(rhs_raw)]
+
+  if (length(missing_survey) > 0 || length(missing_rhs) > 0) {
+    parts <- character()
+    if (length(missing_survey) > 0) {
+      parts <- c(parts, sprintf(
+        "survey data missing mapped column(s): %s",
+        paste(sprintf("%s='%s'", names(missing_survey), missing_survey), collapse = ", ")
+      ))
+    }
+    if (length(missing_rhs) > 0) {
+      parts <- c(parts, sprintf(
+        "auxiliary covariates missing mapped column(s): %s",
+        paste(sprintf("%s='%s'", names(missing_rhs), missing_rhs), collapse = ", ")
+      ))
+    }
+    stop("Input column mapping error: ", paste(parts, collapse = "; "), call. = FALSE)
+  }
+
+  invisible(TRUE)
+}
+
 # Helper: read uploaded or default data and harmonize variable names
 load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
-                               povline_type = "column", povline_value = NULL) {
+                               povline_type = "column", povline_value = NULL,
+                               indicator_type = "poverty") {
   survey_raw <- tryCatch(readRDS(survey_path), error = function(e) NULL)
   rhs_raw    <- tryCatch(readRDS(rhs_path),    error = function(e) NULL)
 
   if (is.null(survey_raw) || is.null(rhs_raw)) return(NULL)
+
+  validate_mapped_input_columns(
+    survey_raw = survey_raw,
+    rhs_raw = rhs_raw,
+    var_map = var_map,
+    rhs_domain = rhs_domain,
+    povline_type = povline_type,
+    indicator_type = indicator_type
+  )
 
   # Build rename vector from var_map
   rename_vec <- c()
@@ -135,6 +191,14 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   if (var_map$psu     != "psu")     rename_vec <- c(rename_vec, psu     = var_map$psu)
   if (var_map$welfare != "welfare") rename_vec <- c(rename_vec, welfare = var_map$welfare)
   if (var_map$weight  != "weight")  rename_vec <- c(rename_vec, weight  = var_map$weight)
+  if (!is.null(var_map$strata) && nzchar(var_map$strata) &&
+      var_map$strata != "strata") {
+    rename_vec <- c(rename_vec, strata = var_map$strata)
+  }
+  if (!is.null(var_map$region) && nzchar(var_map$region) &&
+      var_map$region %in% names(survey_raw) && var_map$region != "region") {
+    rename_vec <- c(rename_vec, region = var_map$region)
+  }
   if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
       var_map$hh_size != "hh_size") {
     rename_vec <- c(rename_vec, hh_size = var_map$hh_size)
@@ -163,10 +227,27 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
       as.numeric(survey_data$weight) * as.numeric(survey_data$hh_size)
     )
   }
+  if ("domain" %in% names(survey_data)) {
+    survey_data$domain <- trimws(as.character(survey_data$domain))
+  }
+  if ("region" %in% names(survey_data)) {
+    survey_data$region <- trimws(as.character(survey_data$region))
+  }
 
   rhs_data <- rhs_raw
   if (rhs_domain != "domain" && rhs_domain %in% names(rhs_data)) {
     names(rhs_data)[names(rhs_data) == rhs_domain] <- "domain"
+  }
+  rhs_year <- if (!is.null(var_map$year) && var_map$year %in% names(rhs_data)) {
+    var_map$year
+  } else {
+    "year"
+  }
+  if (rhs_year != "year" && rhs_year %in% names(rhs_data)) {
+    names(rhs_data)[names(rhs_data) == rhs_year] <- "year"
+  }
+  if ("domain" %in% names(rhs_data)) {
+    rhs_data$domain <- trimws(as.character(rhs_data$domain))
   }
 
   list(survey = survey_data, rhs = rhs_data)
@@ -793,6 +874,9 @@ ui <- fluidPage(
       textInput("years",
         tip_label("Analysis years (two, comma-separated)", "Enter exactly two years separated by a comma. The pipeline estimates poverty for each year and tests for significant changes between them."),
         value = "2012,2013"),
+      textInput("run_label",
+        tip_label("Run label", "Optional short label appended to the saved app_runs folder so outputs from different runs are easier to distinguish."),
+        value = ""),
       checkboxGroupInput("steps",
         tip_label("Pipeline steps", "UFH fits a univariate Fay-Herriot model per year. MFH fits multivariate models (MFH1, MFH2, MFH3) that borrow strength across time. Comparison merges both results side by side with maps and precision metrics."),
         choices = c("UFH", "MFH", "Comparison"),
@@ -808,9 +892,19 @@ ui <- fluidPage(
         tip_label("Auxiliary covariates (.rds)", "Domain-level covariates used as regressors in the Fay-Herriot models. Leave blank to use the default data.")),
       fileInput("shp_file",
         tip_label("Shapefiles (.rds)", "An sf object with domain polygons for poverty mapping. Leave blank to use the default Greek geometries.")),
+      checkboxInput("do_benchmark",
+        tip_label("Apply benchmarking", "If checked, UFH and MFH estimates are benchmarked at the selected level. If unchecked, uploaded benchmark files are ignored for the next run."),
+        value = FALSE),
+      conditionalPanel(
+        condition = "input.do_benchmark",
+        selectInput("benchmark_level",
+          tip_label("Benchmark level", "Benchmark either to the national total or to regions. Regional benchmarking requires the region variable below."),
+          choices = c("National" = "national", "Region" = "region"),
+          selected = "national")
+      ),
       fileInput("regional_benchmark_file",
         tip_label("Regional benchmark targets (optional)",
-                  "Optional RDS/CSV/XLSX file with direct regional benchmark estimates by region and year. If supplied, MFH regional benchmarking uses these targets instead of aggregating domain-level direct estimates.")),
+                  "Optional RDS/CSV/XLSX file with benchmark estimates by selected benchmark level and year. Used only when benchmarking is enabled.")),
       fileInput("population_file",
         tip_label("Domain population sizes (optional)",
                   "Optional RDS/CSV/XLSX file with domain population sizes. Supports long domain-year-population format or wide domain-by-year format; leave blank to estimate domain populations from the survey as sum(weight * household size).")),
@@ -830,9 +924,15 @@ ui <- fluidPage(
       textInput("var_weight",
         tip_label("weight", "Column name for the survey sampling weight."),
         "weight"),
+      textInput("var_strata",
+        tip_label("strata", "Optional strata ID column for survey-design variance estimation. Leave blank if the survey design has no strata or strata are unavailable."),
+        ""),
       textInput("var_hh_size",
         tip_label("household size", "Column name for household size. Direct poverty-rate estimates use population_weight = weight * household size; when no population file is uploaded, benchmarking also estimates domain populations as sum(weight * household size) by domain and year."),
         "hhsize"),
+      textInput("var_region",
+        tip_label("benchmark region", "Column name for the higher-level region used only when regional benchmarking is enabled. For national benchmarking this can be left as-is."),
+        "region"),
       textInput("var_welfare",
         tip_label("welfare", "Column name for the welfare variable (e.g. income or consumption) used to determine poverty status."),
         "income"),
@@ -1163,7 +1263,9 @@ server <- function(input, output, session) {
       domain  = input$var_domain,
       psu     = input$var_psu,
       weight  = input$var_weight,
+      strata  = input$var_strata %||% "",
       hh_size = input$var_hh_size,
+      region  = input$var_region %||% "region",
       welfare = input$var_welfare,
       poor    = "poor"
     )
@@ -1541,8 +1643,10 @@ server <- function(input, output, session) {
     list(
       # Files and variable mapping
       input$survey_file, input$rhs_file, input$shp_file,
+      input$regional_benchmark_file, input$population_file,
       input$var_year, input$var_domain, input$var_psu,
-      input$var_weight, input$var_hh_size, input$var_welfare, input$var_povline,
+      input$var_weight, input$var_strata, input$var_hh_size,
+      input$var_region, input$var_welfare, input$var_povline,
       input$rhs_domain, input$shp_domain,
       # Poverty-line config
       input$povline_type, input$povline_numeric,
@@ -1554,7 +1658,10 @@ server <- function(input, output, session) {
       input$ufh_transformation, input$ufh_backtrans,
       input$mfh_transformation, input$mfh_backtrans,
       # Which steps will run (changes the readiness scope/messages)
-      input$steps
+      input$steps,
+      # Benchmarking choices affect required variables and outputs.
+      input$do_benchmark, input$benchmark_level,
+      input$run_label
     )
     isolate({
       if (isTRUE(readiness_checked())) {
@@ -1575,8 +1682,16 @@ server <- function(input, output, session) {
     survey_path <- resolve_upload(input$survey_file)
     rhs_path    <- resolve_upload(input$rhs_file)
     shp_path    <- resolve_upload(input$shp_file)
-    regional_benchmark_path <- resolve_upload(input$regional_benchmark_file)
-    population_path <- resolve_upload(input$population_file)
+    regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
+      resolve_upload(input$regional_benchmark_file)
+    } else {
+      NULL
+    }
+    population_path <- if (isTRUE(input$do_benchmark)) {
+      resolve_upload(input$population_file)
+    } else {
+      NULL
+    }
     var_map     <- get_var_map()
 
     survey_for_validation <- survey_path %||% "data/pov_direct3.rds"
@@ -1586,7 +1701,8 @@ server <- function(input, output, session) {
       load_and_harmonize(survey_for_validation, rhs_for_validation,
                          var_map, input$rhs_domain,
                          povline_type  = input$povline_type %||% "column",
-                         povline_value = input$povline_numeric),
+                         povline_value = input$povline_numeric,
+                         indicator_type = input$indicator_type %||% "poverty"),
       error = function(e) {
         append_log(paste("ERROR while loading data:", conditionMessage(e)))
         NULL
@@ -1613,10 +1729,12 @@ server <- function(input, output, session) {
     survey_raw_check <- tryCatch(readRDS(survey_for_validation), error = function(e) NULL)
     rhs_raw_check    <- tryCatch(readRDS(rhs_for_validation),    error = function(e) NULL)
     year_var_name    <- var_map$year
+    requested_years  <- parse_years(input$years)
 
     if (!is.null(survey_raw_check) && !is.null(rhs_raw_check)) {
       survey_has_year <- year_var_name %in% names(survey_raw_check)
-      aux_has_year    <- year_var_name %in% names(rhs_raw_check)
+      aux_year_var_name <- if (year_var_name %in% names(rhs_raw_check)) year_var_name else "year"
+      aux_has_year    <- aux_year_var_name %in% names(rhs_raw_check)
 
       if (survey_has_year && aux_has_year) {
         year_msgs <- c(year_msgs, sprintf(
@@ -1635,7 +1753,7 @@ server <- function(input, output, session) {
 
       if (survey_has_year && aux_has_year) {
         survey_years <- sort(unique(survey_raw_check[[year_var_name]]))
-        aux_years    <- sort(unique(rhs_raw_check[[year_var_name]]))
+        aux_years    <- sort(unique(rhs_raw_check[[aux_year_var_name]]))
         if (identical(as.character(survey_years), as.character(aux_years))) {
           year_msgs <- c(year_msgs, sprintf(
             "Test 0b: Survey and auxiliary covariates cover the same years (%s).",
@@ -1658,6 +1776,35 @@ server <- function(input, output, session) {
             paste(aux_years, collapse = ", ")
           ))
         }
+        missing_requested_survey <- setdiff(requested_years, survey_years)
+        missing_requested_aux <- setdiff(requested_years, aux_years)
+        if (length(missing_requested_survey) > 0 || length(missing_requested_aux) > 0) {
+          parts <- character()
+          if (length(missing_requested_survey) > 0) {
+            parts <- c(parts, sprintf("survey data lacks requested year(s): %s",
+                                      paste(missing_requested_survey, collapse = ", ")))
+          }
+          if (length(missing_requested_aux) > 0) {
+            parts <- c(parts, sprintf("auxiliary covariates lack requested year(s): %s",
+                                      paste(missing_requested_aux, collapse = ", ")))
+          }
+          year_msgs <- c(year_msgs, sprintf(
+            "Test 0b: ERROR -- Requested analysis years (%s) are not available: %s.",
+            paste(requested_years, collapse = ", "),
+            paste(parts, collapse = "; ")
+          ))
+        }
+      }
+    }
+
+    if (isTRUE(input$do_benchmark) &&
+        identical(input$benchmark_level %||% "national", "region")) {
+      region_var <- var_map$region %||% "region"
+      if (is.null(survey_raw_check) || !region_var %in% names(survey_raw_check)) {
+        year_msgs <- c(year_msgs, sprintf(
+          "Test 0d: ERROR -- Regional benchmarking requires region column '%s' in the survey data. Choose national benchmarking or map the region variable.",
+          region_var
+        ))
       }
     }
 
@@ -1669,7 +1816,7 @@ server <- function(input, output, session) {
       survey_data    = harmonized$survey,
       aux_data       = harmonized$rhs,
       geo_data       = geo_raw,
-      domain_var     = input$var_domain,
+      domain_var     = input$shp_domain,
       save_to        = "outputs/tables",
       fgt_alpha      = as.integer(input$fgt_alpha %||% 0),
       indicator_type = input$indicator_type %||% "poverty",
@@ -1685,14 +1832,26 @@ server <- function(input, output, session) {
     readiness_result(rr)
     append_log(sprintf("Data readiness: %d diagnostic messages", length(rr$messages)))
 
-    # Unlock the Run Analysis button and show the results tab.
-    readiness_checked(TRUE)
-    status("Data readiness check complete - review the results, then click Run Analysis.")
+    readiness_errors <- isTRUE(flags$has_errors) ||
+      any(grepl("ERROR", c(flags$flags, rr$messages), ignore.case = FALSE))
+    readiness_checked(!readiness_errors)
+    status(if (readiness_errors) {
+      "Data readiness check found blocking errors"
+    } else {
+      "Data readiness check complete - review the results, then click Run Analysis."
+    })
     updateTabsetPanel(session, "main_tabs", selected = "Data Readiness")
-    showNotification(
-      "Data readiness check complete. Review the Preflight and Data Readiness tabs, then click '2. Run Analysis'.",
-      type = "message", duration = 8
-    )
+    if (readiness_errors) {
+      showNotification(
+        "Data readiness found blocking errors. Fix the items marked ERROR before running the analysis.",
+        type = "error", duration = 10
+      )
+    } else {
+      showNotification(
+        "Data readiness check complete. Review the Preflight and Data Readiness tabs, then click '2. Run Analysis'.",
+        type = "message", duration = 8
+      )
+    }
   })
 
   # ---- Run Pipeline ----
@@ -1752,14 +1911,30 @@ server <- function(input, output, session) {
     }
 
     run_id  <- format(Sys.time(), "%Y%m%d_%H%M%S")
-    run_dir <- file.path("app_runs", run_id)
+    run_label_raw <- trimws(input$run_label %||% "")
+    run_label_safe <- gsub("[^A-Za-z0-9_-]+", "_", run_label_raw)
+    run_label_safe <- gsub("^_+|_+$", "", run_label_safe)
+    run_dir_name <- if (nzchar(run_label_safe)) {
+      paste(run_id, run_label_safe, sep = "_")
+    } else {
+      run_id
+    }
+    run_dir <- file.path("app_runs", run_dir_name)
     dir.create(run_dir, recursive = TRUE, showWarnings = FALSE)
 
     survey_path <- resolve_upload(input$survey_file)
     rhs_path    <- resolve_upload(input$rhs_file)
     shp_path    <- resolve_upload(input$shp_file)
-    regional_benchmark_path <- resolve_upload(input$regional_benchmark_file)
-    population_path <- resolve_upload(input$population_file)
+    regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
+      resolve_upload(input$regional_benchmark_file)
+    } else {
+      NULL
+    }
+    population_path <- if (isTRUE(input$do_benchmark)) {
+      resolve_upload(input$population_file)
+    } else {
+      NULL
+    }
 
     years          <- parse_years(input$years)
     ufh_candidates_y1 <- split_csv(input$ufh_candidates_y1)
@@ -1775,10 +1950,17 @@ server <- function(input, output, session) {
     survey_for_validation <- survey_path %||% "data/pov_direct3.rds"
     rhs_for_validation    <- rhs_path    %||% "data/sae_data.rds"
 
-    harmonized <- load_and_harmonize(survey_for_validation, rhs_for_validation,
-                                     var_map, input$rhs_domain,
-                                     povline_type  = input$povline_type %||% "column",
-                                     povline_value = input$povline_numeric)
+    harmonized <- tryCatch(
+      load_and_harmonize(survey_for_validation, rhs_for_validation,
+                         var_map, input$rhs_domain,
+                         povline_type  = input$povline_type %||% "column",
+                         povline_value = input$povline_numeric,
+                         indicator_type = input$indicator_type %||% "poverty"),
+      error = function(e) {
+        append_log(paste("ERROR while loading data:", conditionMessage(e)))
+        NULL
+      }
+    )
 
     # Map legacy covariance name if browser cached an old session
     mfh_cov_val <- input$mfh_cov_choice
@@ -1795,10 +1977,12 @@ server <- function(input, output, session) {
       survey_raw_check <- tryCatch(readRDS(survey_for_validation), error = function(e) NULL)
       rhs_raw_check    <- tryCatch(readRDS(rhs_for_validation),    error = function(e) NULL)
       year_var_name    <- var_map$year  # the user-specified year column name
+      requested_years  <- years
 
       if (!is.null(survey_raw_check) && !is.null(rhs_raw_check)) {
         survey_has_year <- year_var_name %in% names(survey_raw_check)
-        aux_has_year    <- year_var_name %in% names(rhs_raw_check)
+        aux_year_var_name <- if (year_var_name %in% names(rhs_raw_check)) year_var_name else "year"
+        aux_has_year    <- aux_year_var_name %in% names(rhs_raw_check)
 
         if (survey_has_year && aux_has_year) {
           year_msgs <- c(year_msgs, sprintf(
@@ -1817,7 +2001,7 @@ server <- function(input, output, session) {
 
         if (survey_has_year && aux_has_year) {
           survey_years <- sort(unique(survey_raw_check[[year_var_name]]))
-          aux_years    <- sort(unique(rhs_raw_check[[year_var_name]]))
+          aux_years    <- sort(unique(rhs_raw_check[[aux_year_var_name]]))
           if (identical(as.character(survey_years), as.character(aux_years))) {
             year_msgs <- c(year_msgs, sprintf(
               "Test 0b: Survey and auxiliary covariates cover the same years (%s).",
@@ -1840,6 +2024,35 @@ server <- function(input, output, session) {
               paste(aux_years, collapse = ", ")
             ))
           }
+          missing_requested_survey <- setdiff(requested_years, survey_years)
+          missing_requested_aux <- setdiff(requested_years, aux_years)
+          if (length(missing_requested_survey) > 0 || length(missing_requested_aux) > 0) {
+            parts <- character()
+            if (length(missing_requested_survey) > 0) {
+              parts <- c(parts, sprintf("survey data lacks requested year(s): %s",
+                                        paste(missing_requested_survey, collapse = ", ")))
+            }
+            if (length(missing_requested_aux) > 0) {
+              parts <- c(parts, sprintf("auxiliary covariates lack requested year(s): %s",
+                                        paste(missing_requested_aux, collapse = ", ")))
+            }
+            year_msgs <- c(year_msgs, sprintf(
+              "Test 0b: ERROR -- Requested analysis years (%s) are not available: %s.",
+              paste(requested_years, collapse = ", "),
+              paste(parts, collapse = "; ")
+            ))
+          }
+        }
+      }
+
+      if (isTRUE(input$do_benchmark) &&
+          identical(input$benchmark_level %||% "national", "region")) {
+        region_var <- var_map$region %||% "region"
+        if (is.null(survey_raw_check) || !region_var %in% names(survey_raw_check)) {
+          year_msgs <- c(year_msgs, sprintf(
+            "Test 0d: ERROR -- Regional benchmarking requires region column '%s' in the survey data. Choose national benchmarking or map the region variable.",
+            region_var
+          ))
         }
       }
 
@@ -1851,7 +2064,7 @@ server <- function(input, output, session) {
         survey_data    = harmonized$survey,
         aux_data       = harmonized$rhs,
         geo_data       = geo_raw,
-        domain_var     = input$var_domain,
+        domain_var     = input$shp_domain,
         save_to        = "outputs/tables",
         fgt_alpha      = as.integer(input$fgt_alpha %||% 0),
         indicator_type = input$indicator_type %||% "poverty",
@@ -1865,6 +2078,17 @@ server <- function(input, output, session) {
       rr$messages <- c(year_msgs, rr$messages)
       readiness_result(rr)
       append_log(sprintf("Data readiness: %d diagnostic messages", length(rr$messages)))
+      readiness_errors <- isTRUE(flags$has_errors) ||
+        any(grepl("ERROR", c(flags$flags, rr$messages), ignore.case = FALSE))
+      if (readiness_errors) {
+        status("Data readiness check found blocking errors")
+        append_log("ERROR: Data readiness found blocking errors; pipeline was not started.")
+        showNotification(
+          "Data readiness found blocking errors. Fix the items marked ERROR before running the analysis.",
+          type = "error", duration = 10
+        )
+        return()
+      }
 
       # Generate data properties note (template-based, no LLM)
       data_note <- generate_data_note(
@@ -1906,6 +2130,8 @@ server <- function(input, output, session) {
           cov_choice     = mfh_cov_val,
           diag_model     = input$mfh_diag_model,
           fit_mfh3       = isTRUE(input$fit_mfh3),
+          do_benchmark   = isTRUE(input$do_benchmark),
+          benchmark_level = input$benchmark_level %||% "national",
           regional_benchmark_path = regional_benchmark_path,
           population_path         = population_path,
           candidate_vars_y1 = mfh_candidates_y1,
@@ -2018,6 +2244,8 @@ server <- function(input, output, session) {
       rhs_path                = rhs_path    %||% "data/sae_data.rds",
       shp_path                = shp_path    %||% "data/geometries.rds",
       population_path         = population_path,
+      do_benchmark            = isTRUE(input$do_benchmark),
+      benchmark_level         = input$benchmark_level %||% "national",
       var_map                 = var_map,
       rhs_domain              = input$rhs_domain,
       shp_domain              = input$shp_domain,
@@ -2065,6 +2293,8 @@ server <- function(input, output, session) {
       shp_path                = shp_path    %||% "data/geometries.rds",
       regional_benchmark_path = regional_benchmark_path,
       population_path         = population_path,
+      do_benchmark            = isTRUE(input$do_benchmark),
+      benchmark_level         = input$benchmark_level %||% "national",
       var_map                 = var_map,
       ic_criterion            = input$mfh_ic_criterion,
       rhs_domain              = input$rhs_domain,
@@ -2109,6 +2339,12 @@ server <- function(input, output, session) {
       povline_type    = input$povline_type %||% "column",
       povline_value   = if (identical(input$povline_type, "numeric"))
                           input$povline_numeric else input$var_povline,
+      run_id          = run_id,
+      run_label       = run_label_raw,
+      benchmarking    = list(
+        enabled = isTRUE(input$do_benchmark),
+        level   = input$benchmark_level %||% "national"
+      ),
       run             = list(steps = input$steps),
       ufh             = ufh_cfg,
       mfh             = mfh_cfg
@@ -2247,10 +2483,15 @@ server <- function(input, output, session) {
       "outputs/data/pov_comparison_detailed.xlsx",
       "outputs/data/statistical_significance_comparison.xlsx"
     )
+    bench_phrase <- if (isTRUE(input$do_benchmark)) {
+      "with benchmarked values, CVs, and MSEs"
+    } else {
+      "with estimates, CVs, and MSEs (benchmarking off)"
+    }
     descriptions <- c(
       "Combined HTML report with UFH, MFH, and Comparison results including diagnostics, maps, and scatter plots",
-      "UFH (Fay-Herriot) poverty estimates with benchmarked values, CVs, and MSEs",
-      "MFH poverty estimates with benchmarked values, CVs, and MSEs",
+      paste("UFH (Fay-Herriot) poverty estimates", bench_phrase),
+      paste("MFH poverty estimates", bench_phrase),
       "AI-generated companion note with section-by-section interpretive commentary (overview, normality, rates, precision, significance, maps)",
       "Detailed comparison of UFH and MFH poverty estimates with CVs and MSEs for every domain and year",
       "Combined statistical significance tests for year-on-year poverty changes from both models"
@@ -2517,6 +2758,25 @@ server <- function(input, output, session) {
     }
 
     if (ok) {
+      archive_dir <- file.path(run_dir, "outputs")
+      tryCatch({
+        if (dir.exists(archive_dir)) {
+          unlink(archive_dir, recursive = TRUE, force = TRUE)
+        }
+        dir.create(archive_dir, recursive = TRUE, showWarnings = FALSE)
+        output_files <- list.files("outputs", all.files = TRUE, no.. = TRUE,
+                                   full.names = TRUE)
+        if (length(output_files) > 0) {
+          file.copy(output_files, archive_dir, recursive = TRUE,
+                    overwrite = TRUE, copy.date = TRUE)
+        }
+        append_log(paste(
+          "Archived run outputs:",
+          normalizePath(archive_dir, winslash = "/", mustWork = FALSE)
+        ))
+      }, error = function(e) {
+        append_log(paste("WARNING: Could not archive run outputs:", e$message))
+      })
       status("Completed successfully")
       progress$set(value = n_steps, detail = "Complete")
       append_log("Pipeline finished.")

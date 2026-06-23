@@ -16,6 +16,7 @@
 validate_inputs <- function(survey_data, aux_data) {
   flags   <- character()
   summary <- list()
+  has_errors <- FALSE
 
 
   # --- Survey data checks ---
@@ -26,6 +27,27 @@ validate_inputs <- function(survey_data, aux_data) {
 
   n_obs <- nrow(survey_data)
   summary$n_obs <- n_obs
+
+  required_survey_cols <- c("domain", "year", "psu", "weight", "hh_size", "welfare")
+  missing_required <- setdiff(required_survey_cols, names(survey_data))
+  if (length(missing_required) > 0) {
+    flags <- c(flags, sprintf(
+      "ERROR: Required survey column(s) missing after variable mapping: %s",
+      paste(missing_required, collapse = ", ")
+    ))
+    has_errors <- TRUE
+  }
+
+  if (!is.null(aux_data) && nrow(aux_data) > 0) {
+    missing_aux_required <- setdiff(c("domain", "year"), names(aux_data))
+    if (length(missing_aux_required) > 0) {
+      flags <- c(flags, sprintf(
+        "ERROR: Required auxiliary column(s) missing after variable mapping: %s",
+        paste(missing_aux_required, collapse = ", ")
+      ))
+      has_errors <- TRUE
+    }
+  }
 
   # Missing values
   na_counts <- colSums(is.na(survey_data))
@@ -159,7 +181,7 @@ validate_inputs <- function(survey_data, aux_data) {
   list(
     flags      = flags,
     summary    = summary,
-    has_errors = FALSE
+    has_errors = has_errors
   )
 }
 
@@ -393,7 +415,7 @@ assess_data_readiness <- function(survey_data,
   # ------------------------------------------------------------------
   # For each year, check which auxiliary domains lack a poverty rate
   missing_pov <- data.frame(
-    domain = integer(), year = integer(),
+    domain = character(), year = integer(),
     reason = character(), stringsAsFactors = FALSE
   )
   for (yr in years) {

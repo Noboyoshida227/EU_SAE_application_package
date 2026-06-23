@@ -59,6 +59,10 @@ change_colors <- c(
   "MFH Benchmarked" = "#ff7f0e"
 )
 
+.benchmark_enabled <- isTRUE(.cmp_cfg$benchmarking$enabled) ||
+  isTRUE(.cmp_cfg$ufh$do_benchmark) ||
+  isTRUE(.cmp_cfg$mfh$do_benchmark)
+
 # ---- Diagnostic: report artifact timestamps + file size so we can spot
 # stale outputs from a previous render that never got refreshed. We ALSO
 # write the diagnostic to output/Comparison/_diagnostics.txt so the user
@@ -394,6 +398,12 @@ plot_metric_comparison <- function(year_value, metric_name, include_direct = TRU
     cv = c("Direct_CV", "FH_CV", "FH_Bench_CV", "MFH_CV", "MFH_Bench_CV")
   )
 
+  if (!.benchmark_enabled) {
+    metric_spec <- lapply(metric_spec, function(cols) {
+      cols[!grepl("_Bench", cols)]
+    })
+  }
+
   # Drop MFH series when model was not properly executed
 
   if (.mfh_not_executed) {
@@ -553,9 +563,11 @@ if (.mfh_not_executed) {
     summarize(
       mean_direct = mean(Direct, na.rm = TRUE),
       mean_fh = mean(FH, na.rm = TRUE),
-      mean_fh_bench = mean(FH_Bench, na.rm = TRUE),
       mean_fh_mse = mean(FH_MSE, na.rm = TRUE),
-      mean_fh_bench_mse = mean(FH_Bench_MSE, na.rm = TRUE),
+      !!!if (.benchmark_enabled) list(
+        mean_fh_bench = quote(mean(FH_Bench, na.rm = TRUE)),
+        mean_fh_bench_mse = quote(mean(FH_Bench_MSE, na.rm = TRUE))
+      ) else list(),
       .groups = "drop"
     )
 } else {
@@ -564,22 +576,25 @@ if (.mfh_not_executed) {
     summarize(
       mean_direct = mean(Direct, na.rm = TRUE),
       mean_fh = mean(FH, na.rm = TRUE),
-      mean_fh_bench = mean(FH_Bench, na.rm = TRUE),
       mean_mfh = mean(MFH, na.rm = TRUE),
-      mean_mfh_bench = mean(MFH_Bench, na.rm = TRUE),
       mean_fh_mse = mean(FH_MSE, na.rm = TRUE),
-      mean_fh_bench_mse = mean(FH_Bench_MSE, na.rm = TRUE),
       mean_mfh_mse = mean(MFH_MSE, na.rm = TRUE),
-      mean_mfh_bench_mse = mean(MFH_Bench_MSE, na.rm = TRUE),
+      !!!if (.benchmark_enabled) list(
+        mean_fh_bench = quote(mean(FH_Bench, na.rm = TRUE)),
+        mean_mfh_bench = quote(mean(MFH_Bench, na.rm = TRUE)),
+        mean_fh_bench_mse = quote(mean(FH_Bench_MSE, na.rm = TRUE)),
+        mean_mfh_bench_mse = quote(mean(MFH_Bench_MSE, na.rm = TRUE))
+      ) else list(),
       .groups = "drop"
     )
 }
 
 if (.mfh_not_executed) {
-  sig_summary_tbl <- bind_rows(
-    prepare_sig_tbl(sig_fh, "FH"),
-    prepare_sig_tbl(sig_fh_bench, "FH Benchmarked")
-  ) %>%
+  .summary_sig_inputs <- list(prepare_sig_tbl(sig_fh, "FH"))
+  if (.benchmark_enabled) {
+    .summary_sig_inputs <- c(.summary_sig_inputs, list(prepare_sig_tbl(sig_fh_bench, "FH Benchmarked")))
+  }
+  sig_summary_tbl <- bind_rows(.summary_sig_inputs) %>%
     group_by(method) %>%
     summarize(
       significant_domains = sum(significant, na.rm = TRUE),
@@ -587,12 +602,17 @@ if (.mfh_not_executed) {
       .groups = "drop"
     )
 } else {
-  sig_summary_tbl <- bind_rows(
+  .summary_sig_inputs <- list(
     prepare_sig_tbl(sig_fh, "FH"),
-    prepare_sig_tbl(sig_fh_bench, "FH Benchmarked"),
-    prepare_sig_tbl(sig_mfh, "MFH", signif_true = c("Significant")),
-    prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
-  ) %>%
+    prepare_sig_tbl(sig_mfh, "MFH", signif_true = c("Significant"))
+  )
+  if (.benchmark_enabled) {
+    .summary_sig_inputs <- c(.summary_sig_inputs, list(
+      prepare_sig_tbl(sig_fh_bench, "FH Benchmarked"),
+      prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
+    ))
+  }
+  sig_summary_tbl <- bind_rows(.summary_sig_inputs) %>%
     group_by(method) %>%
     summarize(
       significant_domains = sum(significant, na.rm = TRUE),
@@ -1012,14 +1032,22 @@ plot_rmse_map <- function(col_name, method_label, year_val) {
 
 .display_map_specs <- list(
   list(col = "Direct",    label = "Direct Map"),
-  list(col = "FH",        label = "FH Map"),
-  list(col = "FH_Bench",  label = "FH Benchmarked Map")
+  list(col = "FH",        label = "FH Map")
 )
+if (.benchmark_enabled) {
+  .display_map_specs <- c(.display_map_specs, list(
+    list(col = "FH_Bench",  label = "FH Benchmarked Map")
+  ))
+}
 if (!.mfh_not_executed) {
   .display_map_specs <- c(.display_map_specs, list(
-    list(col = "MFH",       label = "MFH Map"),
-    list(col = "MFH_Bench", label = "MFH Benchmarked Map")
+    list(col = "MFH",       label = "MFH Map")
   ))
+  if (.benchmark_enabled) {
+    .display_map_specs <- c(.display_map_specs, list(
+      list(col = "MFH_Bench", label = "MFH Benchmarked Map")
+    ))
+  }
 }
 for (.spec in .display_map_specs) {
   for (.yr in years_keep) {
@@ -1030,24 +1058,35 @@ for (.spec in .display_map_specs) {
 
 
 if (.mfh_not_executed) {
-  sig_plot_dt <- bind_rows(
-    prepare_sig_tbl(sig_fh, "FH"),
-    prepare_sig_tbl(sig_fh_bench, "FH Benchmarked")
-  ) %>%
+  .sig_inputs <- list(prepare_sig_tbl(sig_fh, "FH"))
+  if (.benchmark_enabled) {
+    .sig_inputs <- c(.sig_inputs, list(prepare_sig_tbl(sig_fh_bench, "FH Benchmarked")))
+  }
+  sig_plot_dt <- bind_rows(.sig_inputs) %>%
     mutate(
       significant_label = ifelse(significant, "Significant", "Not Significant"),
-      method = factor(method, levels = c("FH", "FH Benchmarked"))
+      method = factor(method, levels = c("FH", if (.benchmark_enabled) "FH Benchmarked"))
     )
 } else {
-  sig_plot_dt <- bind_rows(
+  .sig_inputs <- list(
     prepare_sig_tbl(sig_fh, "FH"),
-    prepare_sig_tbl(sig_fh_bench, "FH Benchmarked"),
-    prepare_sig_tbl(sig_mfh, "MFH", signif_true = c("Significant")),
-    prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
-  ) %>%
+    prepare_sig_tbl(sig_mfh, "MFH", signif_true = c("Significant"))
+  )
+  if (.benchmark_enabled) {
+    .sig_inputs <- c(.sig_inputs, list(
+      prepare_sig_tbl(sig_fh_bench, "FH Benchmarked"),
+      prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
+    ))
+  }
+  sig_plot_dt <- bind_rows(.sig_inputs) %>%
     mutate(
       significant_label = ifelse(significant, "Significant", "Not Significant"),
-      method = factor(method, levels = c("FH", "FH Benchmarked", "MFH", "MFH Benchmarked"))
+      method = factor(method, levels = c(
+        "FH",
+        if (.benchmark_enabled) "FH Benchmarked",
+        "MFH",
+        if (.benchmark_enabled) "MFH Benchmarked"
+      ))
     )
 }
 
@@ -1074,14 +1113,17 @@ plot_significance <- function(data, method_name) {
 
 plot_significance(sig_plot_dt, "FH")
 
-
-plot_significance(sig_plot_dt, "FH Benchmarked")
-
-
-plot_significance(sig_plot_dt, "MFH")
+if (.benchmark_enabled) {
+  plot_significance(sig_plot_dt, "FH Benchmarked")
+}
 
 
-plot_significance(sig_plot_dt, "MFH Benchmarked")
+if (!.mfh_not_executed) {
+  plot_significance(sig_plot_dt, "MFH")
+  if (.benchmark_enabled) {
+    plot_significance(sig_plot_dt, "MFH Benchmarked")
+  }
+}
 
 
 change_map_fh <- shp_dt %>%
@@ -1113,91 +1155,95 @@ ggplot(change_map_fh) +
   )
 
 
-change_map_fh_bench <- shp_dt %>%
-  select(domain, geometry) %>%
-  left_join(sig_plot_dt %>% filter(method == "FH Benchmarked") %>% select(domain, diff), by = "domain")
+if (.benchmark_enabled) {
+  change_map_fh_bench <- shp_dt %>%
+    select(domain, geometry) %>%
+    left_join(sig_plot_dt %>% filter(method == "FH Benchmarked") %>% select(domain, diff), by = "domain")
 
-ggplot(change_map_fh_bench) +
-  geom_sf(aes(fill = diff), color = NA) +
-  scale_fill_gradient2(
-    low = "#2c7bb6",
-    mid = "white",
-    high = "#d7191c",
-    midpoint = 0,
-    labels = label_number(accuracy = 0.01),
-    na.value = "grey90"
-  ) +
-  labs(
-    title = "2. Poverty Change Map: FH Benchmarked",
-    fill = "Change"
-  ) +
-  theme_minimal(base_size = 17) +
-  theme(
-    plot.title = element_text(size = 24, face = "bold"),
-    legend.title = element_text(size = 17),
-    legend.text = element_text(size = 15),
-    axis.text = element_blank(),
-    axis.ticks = element_blank(),
-    panel.grid = element_blank()
-  )
+  ggplot(change_map_fh_bench) +
+    geom_sf(aes(fill = diff), color = NA) +
+    scale_fill_gradient2(
+      low = "#2c7bb6",
+      mid = "white",
+      high = "#d7191c",
+      midpoint = 0,
+      labels = label_number(accuracy = 0.01),
+      na.value = "grey90"
+    ) +
+    labs(
+      title = "2. Poverty Change Map: FH Benchmarked",
+      fill = "Change"
+    ) +
+    theme_minimal(base_size = 17) +
+    theme(
+      plot.title = element_text(size = 24, face = "bold"),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank()
+    )
+}
 
+if (!.mfh_not_executed) {
+  change_map_mfh <- shp_dt %>%
+    select(domain, geometry) %>%
+    left_join(sig_plot_dt %>% filter(method == "MFH") %>% select(domain, diff), by = "domain")
 
-change_map_mfh <- shp_dt %>%
-  select(domain, geometry) %>%
-  left_join(sig_plot_dt %>% filter(method == "MFH") %>% select(domain, diff), by = "domain")
+  ggplot(change_map_mfh) +
+    geom_sf(aes(fill = diff), color = NA) +
+    scale_fill_gradient2(
+      low = "#2c7bb6",
+      mid = "white",
+      high = "#d7191c",
+      midpoint = 0,
+      labels = label_number(accuracy = 0.01),
+      na.value = "grey90"
+    ) +
+    labs(
+      title = "3. Poverty Change Map: MFH",
+      fill = "Change"
+    ) +
+    theme_minimal(base_size = 17) +
+    theme(
+      plot.title = element_text(size = 24, face = "bold"),
+      legend.title = element_text(size = 17),
+      legend.text = element_text(size = 15),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank()
+    )
 
-ggplot(change_map_mfh) +
-  geom_sf(aes(fill = diff), color = NA) +
-  scale_fill_gradient2(
-    low = "#2c7bb6",
-    mid = "white",
-    high = "#d7191c",
-    midpoint = 0,
-    labels = label_number(accuracy = 0.01),
-    na.value = "grey90"
-  ) +
-  labs(
-    title = "3. Poverty Change Map: MFH",
-    fill = "Change"
-  ) +
-  theme_minimal(base_size = 17) +
-  theme(
-    plot.title = element_text(size = 24, face = "bold"),
-    legend.title = element_text(size = 17),
-    legend.text = element_text(size = 15),
-    axis.text = element_blank(),
-    axis.ticks = element_blank(),
-    panel.grid = element_blank()
-  )
+  if (.benchmark_enabled) {
+    change_map_mfh_bench <- shp_dt %>%
+      select(domain, geometry) %>%
+      left_join(sig_plot_dt %>% filter(method == "MFH Benchmarked") %>% select(domain, diff), by = "domain")
 
-
-change_map_mfh_bench <- shp_dt %>%
-  select(domain, geometry) %>%
-  left_join(sig_plot_dt %>% filter(method == "MFH Benchmarked") %>% select(domain, diff), by = "domain")
-
-ggplot(change_map_mfh_bench) +
-  geom_sf(aes(fill = diff), color = NA) +
-  scale_fill_gradient2(
-    low = "#2c7bb6",
-    mid = "white",
-    high = "#d7191c",
-    midpoint = 0,
-    labels = label_number(accuracy = 0.01),
-    na.value = "grey90"
-  ) +
-  labs(
-    title = "4. Poverty Change Map: MFH Benchmarked",
-    fill = "Change"
-  ) +
-  theme_minimal(base_size = 17) +
-  theme(
-    plot.title = element_text(size = 24, face = "bold"),
-    legend.title = element_text(size = 17),
-    legend.text = element_text(size = 15),
-    axis.text = element_blank(),
-    axis.ticks = element_blank(),
-    panel.grid = element_blank()
-  )
+    ggplot(change_map_mfh_bench) +
+      geom_sf(aes(fill = diff), color = NA) +
+      scale_fill_gradient2(
+        low = "#2c7bb6",
+        mid = "white",
+        high = "#d7191c",
+        midpoint = 0,
+        labels = label_number(accuracy = 0.01),
+        na.value = "grey90"
+      ) +
+      labs(
+        title = "4. Poverty Change Map: MFH Benchmarked",
+        fill = "Change"
+      ) +
+      theme_minimal(base_size = 17) +
+      theme(
+        plot.title = element_text(size = 24, face = "bold"),
+        legend.title = element_text(size = 17),
+        legend.text = element_text(size = 15),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank()
+      )
+  }
+}
 
 
 # ============================================================================
@@ -1378,14 +1424,22 @@ for (.yr in years_keep) {
 message("Exporting poverty level maps ...")
 .map_specs <- list(
   list(col = "Direct",    label = "Direct Map",          tag = "direct"),
-  list(col = "FH",        label = "FH Map",              tag = "fh"),
-  list(col = "FH_Bench",  label = "FH Benchmarked Map",  tag = "fh_benchmarked")
+  list(col = "FH",        label = "FH Map",              tag = "fh")
 )
+if (.benchmark_enabled) {
+  .map_specs <- c(.map_specs, list(
+    list(col = "FH_Bench",  label = "FH Benchmarked Map",  tag = "fh_benchmarked")
+  ))
+}
 if (!.mfh_not_executed) {
   .map_specs <- c(.map_specs, list(
-    list(col = "MFH",       label = "MFH Map",             tag = "mfh"),
-    list(col = "MFH_Bench", label = "MFH Benchmarked Map", tag = "mfh_benchmarked")
+    list(col = "MFH",       label = "MFH Map",             tag = "mfh")
   ))
+  if (.benchmark_enabled) {
+    .map_specs <- c(.map_specs, list(
+      list(col = "MFH_Bench", label = "MFH Benchmarked Map", tag = "mfh_benchmarked")
+    ))
+  }
 }
 for (.spec in .map_specs) {
   for (.yr in years_keep) {
@@ -1402,14 +1456,22 @@ for (.spec in .map_specs) {
 message("Exporting RMSE maps ...")
 .rmse_map_specs <- list(
   list(col = "Direct",    label = "Direct",          tag = "direct"),
-  list(col = "FH",        label = "FH",              tag = "fh"),
-  list(col = "FH_Bench",  label = "FH Benchmarked",  tag = "fh_benchmarked")
+  list(col = "FH",        label = "FH",              tag = "fh")
 )
+if (.benchmark_enabled) {
+  .rmse_map_specs <- c(.rmse_map_specs, list(
+    list(col = "FH_Bench",  label = "FH Benchmarked",  tag = "fh_benchmarked")
+  ))
+}
 if (!.mfh_not_executed) {
   .rmse_map_specs <- c(.rmse_map_specs, list(
-    list(col = "MFH",       label = "MFH",             tag = "mfh"),
-    list(col = "MFH_Bench", label = "MFH Benchmarked", tag = "mfh_benchmarked")
+    list(col = "MFH",       label = "MFH",             tag = "mfh")
   ))
+  if (.benchmark_enabled) {
+    .rmse_map_specs <- c(.rmse_map_specs, list(
+      list(col = "MFH_Bench", label = "MFH Benchmarked", tag = "mfh_benchmarked")
+    ))
+  }
 }
 for (.spec in .rmse_map_specs) {
   for (.yr in years_keep) {
@@ -1425,14 +1487,22 @@ for (.spec in .rmse_map_specs) {
 # ---- Significance plots ----
 message("Exporting significance plots ...")
 .sig_specs <- list(
-  list(method = "FH",              tag = "fh"),
-  list(method = "FH Benchmarked",  tag = "fh_benchmarked")
+  list(method = "FH",              tag = "fh")
 )
+if (.benchmark_enabled) {
+  .sig_specs <- c(.sig_specs, list(
+    list(method = "FH Benchmarked",  tag = "fh_benchmarked")
+  ))
+}
 if (!.mfh_not_executed) {
   .sig_specs <- c(.sig_specs, list(
-    list(method = "MFH",             tag = "mfh"),
-    list(method = "MFH Benchmarked", tag = "mfh_benchmarked")
+    list(method = "MFH",             tag = "mfh")
   ))
+  if (.benchmark_enabled) {
+    .sig_specs <- c(.sig_specs, list(
+      list(method = "MFH Benchmarked", tag = "mfh_benchmarked")
+    ))
+  }
 }
 for (.spec in .sig_specs) {
   .fname <- sprintf("significance_%s.png", .spec$tag)
@@ -1447,17 +1517,25 @@ for (.spec in .sig_specs) {
 message("Exporting change-over-time maps ...")
 .change_map_specs <- list(
   list(method = "FH",              title = "1. Poverty Change Map: FH",
-       tag = "fh"),
-  list(method = "FH Benchmarked",  title = "2. Poverty Change Map: FH Benchmarked",
-       tag = "fh_benchmarked")
+       tag = "fh")
 )
+if (.benchmark_enabled) {
+  .change_map_specs <- c(.change_map_specs, list(
+    list(method = "FH Benchmarked",  title = "2. Poverty Change Map: FH Benchmarked",
+         tag = "fh_benchmarked")
+  ))
+}
 if (!.mfh_not_executed) {
   .change_map_specs <- c(.change_map_specs, list(
     list(method = "MFH",             title = "3. Poverty Change Map: MFH",
-         tag = "mfh"),
-    list(method = "MFH Benchmarked", title = "4. Poverty Change Map: MFH Benchmarked",
-         tag = "mfh_benchmarked")
+         tag = "mfh")
   ))
+  if (.benchmark_enabled) {
+    .change_map_specs <- c(.change_map_specs, list(
+      list(method = "MFH Benchmarked", title = "4. Poverty Change Map: MFH Benchmarked",
+           tag = "mfh_benchmarked")
+    ))
+  }
 }
 for (.spec in .change_map_specs) {
   .fname <- sprintf("change_map_%s.png", .spec$tag)

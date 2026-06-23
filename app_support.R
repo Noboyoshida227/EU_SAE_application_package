@@ -25,6 +25,13 @@ validate_app_config <- function(cfg) {
     errs <- c(errs, paste0("Invalid run steps: ", paste(bad_steps, collapse = ", ")))
   }
 
+  bench_enabled <- isTRUE(cfg$benchmarking$enabled)
+  bench_level <- cfg$benchmarking$level %||% cfg$mfh$benchmark_level %||%
+    cfg$ufh$benchmark_level %||% "national"
+  if (!bench_level %in% c("national", "region")) {
+    errs <- c(errs, "`benchmarking.level` must be one of: national, region.")
+  }
+
   mfh_var <- cfg$mfh$var_choice %||% "sm_out"
   if (!mfh_var %in% c("direct", "sm_out", "sm_all")) {
     errs <- c(errs, "`mfh.var_choice` must be one of: direct, sm_out, sm_all.")
@@ -203,13 +210,69 @@ resolve_upload <- function(file_input, fallback = NULL) {
   normalizePath(file_input$datapath, winslash = "/", mustWork = TRUE)
 }
 
+validate_mapped_input_columns <- function(survey_raw, rhs_raw, var_map, rhs_domain,
+                                          povline_type = "column",
+                                          indicator_type = "poverty") {
+  survey_required <- c(
+    year = var_map$year,
+    domain = var_map$domain,
+    psu = var_map$psu,
+    weight = var_map$weight,
+    hh_size = var_map$hh_size,
+    welfare = var_map$welfare
+  )
+  if (identical(indicator_type, "poverty") && identical(povline_type, "column")) {
+    survey_required <- c(survey_required, povline = var_map$povline)
+  }
+  survey_required <- survey_required[!is.na(survey_required) & nzchar(survey_required)]
+  missing_survey <- survey_required[!survey_required %in% names(survey_raw)]
+
+  rhs_year <- if (!is.null(var_map$year) && var_map$year %in% names(rhs_raw)) {
+    var_map$year
+  } else {
+    "year"
+  }
+  rhs_required <- c(domain = rhs_domain, year = rhs_year)
+  rhs_required <- rhs_required[!is.na(rhs_required) & nzchar(rhs_required)]
+  missing_rhs <- rhs_required[!rhs_required %in% names(rhs_raw)]
+
+  if (length(missing_survey) > 0 || length(missing_rhs) > 0) {
+    parts <- character()
+    if (length(missing_survey) > 0) {
+      parts <- c(parts, sprintf(
+        "survey data missing mapped column(s): %s",
+        paste(sprintf("%s='%s'", names(missing_survey), missing_survey), collapse = ", ")
+      ))
+    }
+    if (length(missing_rhs) > 0) {
+      parts <- c(parts, sprintf(
+        "auxiliary covariates missing mapped column(s): %s",
+        paste(sprintf("%s='%s'", names(missing_rhs), missing_rhs), collapse = ", ")
+      ))
+    }
+    stop("Input column mapping error: ", paste(parts, collapse = "; "), call. = FALSE)
+  }
+
+  invisible(TRUE)
+}
+
 # Helper: read uploaded or default data and harmonize variable names
 load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
-                               povline_type = "column", povline_value = NULL) {
+                               povline_type = "column", povline_value = NULL,
+                               indicator_type = "poverty") {
   survey_raw <- tryCatch(readRDS(survey_path), error = function(e) NULL)
   rhs_raw    <- tryCatch(readRDS(rhs_path),    error = function(e) NULL)
 
   if (is.null(survey_raw) || is.null(rhs_raw)) return(NULL)
+
+  validate_mapped_input_columns(
+    survey_raw = survey_raw,
+    rhs_raw = rhs_raw,
+    var_map = var_map,
+    rhs_domain = rhs_domain,
+    povline_type = povline_type,
+    indicator_type = indicator_type
+  )
 
   # Build rename vector from var_map
   rename_vec <- c()
@@ -217,6 +280,14 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   if (var_map$psu     != "psu")     rename_vec <- c(rename_vec, psu     = var_map$psu)
   if (var_map$welfare != "welfare") rename_vec <- c(rename_vec, welfare = var_map$welfare)
   if (var_map$weight  != "weight")  rename_vec <- c(rename_vec, weight  = var_map$weight)
+  if (!is.null(var_map$strata) && nzchar(var_map$strata) &&
+      var_map$strata != "strata") {
+    rename_vec <- c(rename_vec, strata = var_map$strata)
+  }
+  if (!is.null(var_map$region) && nzchar(var_map$region) &&
+      var_map$region %in% names(survey_raw) && var_map$region != "region") {
+    rename_vec <- c(rename_vec, region = var_map$region)
+  }
   if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
       var_map$hh_size != "hh_size") {
     rename_vec <- c(rename_vec, hh_size = var_map$hh_size)
@@ -245,10 +316,27 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
       as.numeric(survey_data$weight) * as.numeric(survey_data$hh_size)
     )
   }
+  if ("domain" %in% names(survey_data)) {
+    survey_data$domain <- trimws(as.character(survey_data$domain))
+  }
+  if ("region" %in% names(survey_data)) {
+    survey_data$region <- trimws(as.character(survey_data$region))
+  }
 
   rhs_data <- rhs_raw
   if (rhs_domain != "domain" && rhs_domain %in% names(rhs_data)) {
     names(rhs_data)[names(rhs_data) == rhs_domain] <- "domain"
+  }
+  rhs_year <- if (!is.null(var_map$year) && var_map$year %in% names(rhs_data)) {
+    var_map$year
+  } else {
+    "year"
+  }
+  if (rhs_year != "year" && rhs_year %in% names(rhs_data)) {
+    names(rhs_data)[names(rhs_data) == rhs_year] <- "year"
+  }
+  if ("domain" %in% names(rhs_data)) {
+    rhs_data$domain <- trimws(as.character(rhs_data$domain))
   }
 
   list(survey = survey_data, rhs = rhs_data)
