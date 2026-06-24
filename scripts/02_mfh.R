@@ -257,11 +257,45 @@ var_map <- list(
   welfare  = "income",    # welfare aggregate
   povline  = "povline",   # poverty line
   poor     = "poor",      # poverty indicator (if exists)
-  region   = "region"     # higher-level geographic unit for benchmarking
+  benchmark_level = "",    # optional higher-level unit for grouped benchmarking
+  region   = ""            # legacy alias; internally normalized to benchmark_level
 )
 
 if (!is.null(mfh_cfg$var_map)) {
   var_map[names(mfh_cfg$var_map)] <- mfh_cfg$var_map
+}
+
+benchmark_level <- cfg_or_default(
+  mfh_cfg$benchmark_level,
+  cfg$benchmarking$level %||% "national"
+)
+if (!benchmark_level %in% c("national", "custom", "region")) benchmark_level <- "national"
+benchmark_target_path <- cfg_or_default(
+  mfh_cfg$benchmark_target_path %||% mfh_cfg$regional_benchmark_path,
+  cfg$benchmarking$target_path %||% ""
+)
+benchmark_level_var_cfg <- trimws(as.character(cfg_or_default(
+  mfh_cfg$benchmark_level_variable,
+  cfg$benchmarking$level_variable %||% ""
+)))
+mapped_benchmark_level_var <- benchmark_level_var_cfg
+if (!nzchar(mapped_benchmark_level_var)) {
+  mapped_benchmark_level_var <- trimws(as.character(
+    var_map$benchmark_level %||% var_map$region %||% ""
+  ))
+}
+if (identical(benchmark_level, "region") && !nzchar(mapped_benchmark_level_var)) {
+  mapped_benchmark_level_var <- "region"
+}
+if (benchmark_level %in% c("custom", "region")) {
+  if (!nzchar(mapped_benchmark_level_var)) {
+    benchmark_level <- "national"
+  }
+  var_map$benchmark_level <- mapped_benchmark_level_var
+  var_map$region <- mapped_benchmark_level_var
+} else {
+  var_map$benchmark_level <- ""
+  var_map$region <- ""
 }
 
 # ---- Harmonize variable names ----
@@ -302,9 +336,20 @@ cat("MFH direct estimates use population_weight = weight * hh_size.\n")
 survey_dt <- survey_dt %>%
   mutate(domain = trimws(as.character(domain)))
 
-# Rename region column if present in survey data (needed for benchmarking)
-if (var_map$region %in% colnames(survey_dt) && var_map$region != "region") {
-  survey_dt <- survey_dt %>% rename(region = !!var_map$region)
+if (nzchar(var_map$benchmark_level) &&
+    !"region" %in% names(survey_dt) &&
+    var_map$benchmark_level %in% unname(rename_cols_mfh)) {
+  copied_from <- names(rename_cols_mfh)[match(var_map$benchmark_level, unname(rename_cols_mfh))]
+  if (!is.na(copied_from) && copied_from %in% names(survey_dt)) {
+    survey_dt$region <- survey_dt[[copied_from]]
+  }
+}
+
+# Rename benchmark-level column if present in survey data (needed for grouped benchmarking)
+if (nzchar(var_map$benchmark_level) &&
+    var_map$benchmark_level %in% colnames(survey_dt) &&
+    var_map$benchmark_level != "region") {
+  survey_dt <- survey_dt %>% rename(region = !!var_map$benchmark_level)
 }
 if ("region" %in% names(survey_dt)) {
   survey_dt <- survey_dt %>% mutate(region = trimws(as.character(region)))
@@ -414,11 +459,6 @@ mfh_candidate_vars_y2 <- validate_mfh_covs(mfh_candidate_vars_y2, "Year 2")
 # this explicitly; missing values default to FALSE so old sample data are not
 # used accidentally.
 do_benchmark <- isTRUE(mfh_cfg$do_benchmark)
-benchmark_level <- cfg_or_default(
-  mfh_cfg$benchmark_level,
-  cfg$benchmarking$level %||% "national"
-)
-if (!benchmark_level %in% c("national", "region")) benchmark_level <- "national"
 bench_nB <- as.integer(cfg_or_default(mfh_cfg$bench_nB, 200))
 
 # Model selection criterion: "AIC" (default) or "BIC"
@@ -440,10 +480,16 @@ if (do_benchmark) {
       select(domain, region) %>%
       distinct()
   } else {
-    stop("Regional benchmarking requires a mapped region column in the survey data. ",
-         "Choose national benchmarking or map the region variable.")
+    stop("Grouped benchmarking requires mapped benchmark-level column '",
+         var_map$benchmark_level,
+         "' in the survey data. Leave the benchmark-level mapping blank for national benchmarking.")
   }
-  cat("MFH benchmarking enabled at level:", benchmark_level, "\n")
+  bench_desc <- if (identical(benchmark_level, "national")) {
+    "national"
+  } else {
+    paste0("grouped by ", var_map$benchmark_level)
+  }
+  cat("MFH benchmarking enabled at level:", bench_desc, "\n")
 } else {
   region_map <- NULL
   cat("MFH benchmarking disabled by configuration.\n")
@@ -1338,10 +1384,16 @@ if (isTRUE(.model_fit_failed)) {
     db_wide_all[[paste0("cv_", .model_name)]]   <- NA_real_
     db_wide_all[[paste0("rmse_", .model_name)]] <- NA_real_
   }
+  .selected_mfh_cols <- paste0(c("rate_", "mse_", "cv_", "rmse_"), diag_model)
+  .all_mfh_cols <- grep("^(rate|mse|cv|rmse)_MFH[123]$", names(db_wide_all),
+                        value = TRUE)
+  .drop_mfh_cols <- setdiff(.all_mfh_cols, .selected_mfh_cols)
+  db_wide_export <- db_wide_all %>%
+    select(-any_of(.drop_mfh_cols))
 
   dir.create(here::here("outputs", "data"), showWarnings = FALSE, recursive = TRUE)
   dir.create(here::here("outputs", "tables"), showWarnings = FALSE, recursive = TRUE)
-  .write_xlsx_safe(db_wide_all, here::here("outputs", "data", "pov_mfh.xlsx"))
+  .write_xlsx_safe(db_wide_export, here::here("outputs", "data", "pov_mfh.xlsx"))
 
   change_placeholder <- data.frame(
     domain      = sort(unique(as.character(db_wide_all$domain))),
@@ -1670,7 +1722,8 @@ if (.refvar_zero) {
        "(domain/year/population), or a wide table with one row per domain.")
 }
 
-.matrix_from_optional_regional_benchmark <- function(path, region_vec, years_keep) {
+.matrix_from_optional_regional_benchmark <- function(path, region_vec, years_keep,
+                                                     level_col = "") {
   obj <- .read_optional_benchmark_table(path)
   if (is.null(obj)) return(NULL)
 
@@ -1680,30 +1733,40 @@ if (.refvar_zero) {
 
   if (is.matrix(obj)) {
     mat <- obj
-    if (is.null(rownames(mat))) stop("Regional benchmark matrix must have region row names.")
+    if (is.null(rownames(mat))) stop("Benchmark target matrix must have group row names.")
     missing_regions <- setdiff(region_ids, rownames(mat))
     if (length(missing_regions) > 0) {
-      stop("Regional benchmark matrix is missing region(s): ",
+      stop("Benchmark target matrix is missing group(s): ",
            paste(missing_regions, collapse = ", "))
     }
     mat <- mat[region_ids, , drop = FALSE]
-    if (ncol(mat) != nT) stop("Regional benchmark matrix must have one column per analysis year.")
+    if (ncol(mat) != nT) stop("Benchmark target matrix must have one column per analysis year.")
     storage.mode(mat) <- "double"
     colnames(mat) <- year_chr
     if (any(!is.finite(mat))) {
-      stop("Regional benchmark matrix contains missing/non-finite targets.")
+      stop("Benchmark target matrix contains missing/non-finite targets.")
     }
     return(mat)
   }
 
   df <- as.data.frame(obj, check.names = FALSE)
   nms <- names(df)
-  region_col <- .pick_col(nms, c("region", "reg", "region_id"))
+  region_col <- .pick_col(nms, c(level_col, "benchmark_level", "level",
+                                 "group", "group_id", "region", "reg", "region_id"))
   year_col <- .pick_col(nms, c("year", "time", "period"))
-  value_col <- .pick_col(nms, c("benchmark", "B_r", "regional_benchmark",
+  value_col <- .pick_col(nms, c("benchmark", "target", "B_r",
+                                "benchmark_target", "regional_benchmark",
                                 "direct", "direct_rate", "poverty_rate"))
   if (is.null(region_col)) {
-    stop("Regional benchmark input must contain a region column or matrix row names.")
+    if (length(region_ids) == 1L) {
+      region_col <- ".benchmark_level"
+      df[[region_col]] <- region_ids[1]
+    } else {
+      stop("Benchmark Target Database must contain a benchmark-level column ",
+           "(for example '",
+           if (nzchar(level_col)) level_col else "benchmark_level",
+           "') or matrix row names.")
+    }
   }
 
   mat <- matrix(NA_real_, nrow = length(region_ids), ncol = nT,
@@ -1717,7 +1780,7 @@ if (.refvar_zero) {
       mat[intersect(region_ids, ids), tt] <- vals[match(intersect(region_ids, ids), ids)]
     }
     if (any(!is.finite(mat))) {
-      stop("Regional benchmark table is missing benchmark targets for at least one region/year.")
+      stop("Benchmark Target Database is missing targets for at least one benchmark level/year.")
     }
     return(mat)
   }
@@ -1727,16 +1790,17 @@ if (.refvar_zero) {
       year_chr[tt],
       paste0("B_r_", year_chr[tt]),
       paste0("benchmark_", year_chr[tt]),
+      paste0("target_", year_chr[tt]),
       paste0("direct_", year_chr[tt]),
       paste0("poor_", year_chr[tt])
     )
     col <- .pick_col(nms, candidates)
-    if (is.null(col)) stop("Regional benchmark file is missing a column for year ", year_chr[tt], ".")
+    if (is.null(col)) stop("Benchmark Target Database is missing a column for year ", year_chr[tt], ".")
     ids <- as.character(df[[region_col]])
     mat[region_ids, tt] <- as.numeric(df[[col]][match(region_ids, ids)])
   }
   if (any(!is.finite(mat))) {
-    stop("Regional benchmark table is missing benchmark targets for at least one region/year.")
+    stop("Benchmark Target Database is missing targets for at least one benchmark level/year.")
   }
   mat
 }
@@ -1745,7 +1809,7 @@ bench_result <- NULL
 
 # Skip benchmarking when MFH model was not properly executed
 if (.refvar_zero || .model_fit_failed) {
-  cat("Regional benchmarking skipped -- eblupMFH2 did not produce valid random effects.\n")
+  cat("Grouped benchmarking skipped -- eblupMFH2 did not produce valid random effects.\n")
   do_benchmark <- FALSE
 }
 
@@ -1767,14 +1831,14 @@ if (do_benchmark && !is.null(region_map)) {
   )
   bench_Nd <- bench_Nd_mat[, 1]
 
-  regional_benchmark_path <- cfg_or_default(mfh_cfg$regional_benchmark_path, "")
   regional_benchmark_mat <- .matrix_from_optional_regional_benchmark(
-    regional_benchmark_path,
+    benchmark_target_path,
     region_vec = bench_region,
-    years_keep = years_keep
+    years_keep = years_keep,
+    level_col = var_map$benchmark_level
   )
   if (!is.null(regional_benchmark_mat)) {
-    cat("Using external regional benchmarks for benchmarking:", regional_benchmark_path, "\n")
+    cat("Using Benchmark Target Database for MFH benchmarking:", benchmark_target_path, "\n")
   }
 
   # Direct estimates matrix (D x nT)
@@ -1813,10 +1877,10 @@ if (do_benchmark && !is.null(region_map)) {
     do_benchmark <- FALSE
   } else {
 
-    cat("\n--- Regional Benchmarking ---\n")
+    cat("\n--- Grouped Benchmarking ---\n")
     cat("Model:", diag_model, "\n")
     cat("Domains:", length(bench_domains), "\n")
-    cat("Regions:", length(unique(bench_region)), "\n")
+    cat("Benchmark groups:", length(unique(bench_region)), "\n")
     cat("Bootstrap iterations for MSE:", bench_nB, "\n\n")
 
     # Print regional benchmark targets
@@ -1846,12 +1910,12 @@ if (do_benchmark && !is.null(region_map)) {
             .groups = "drop"
           )
       }
-      cat("Regional benchmarks for", poor_cols[tt], ":\n")
+      cat("Benchmark targets for", poor_cols[tt], ":\n")
       print(as.data.frame(reg_bench))
       cat("\n")
     }
 
-    tictoc::tic("MFH regional benchmarking")
+    tictoc::tic("MFH grouped benchmarking")
 
     bench_result <- bench_regional_mfh(
       eblup_mat  = eblup_sel,
@@ -1894,7 +1958,7 @@ if (do_benchmark && !is.null(region_map)) {
 }
 
 if (!do_benchmark || is.null(bench_result)) {
-  cat("Regional benchmarking was not applied.\n")
+  cat("Grouped benchmarking was not applied.\n")
 }
 
 
@@ -3199,8 +3263,8 @@ ggsave(here::here("outputs", "figures", "mfh_growth_rate_map.png"),
 # 1. comparison_final.csv: MCPE-based differences with selected
 #    model (`diag_model` = MFH1/MFH2/MFH3) and direct estimates
 #    by year.
-# 2. pov_mfh.xlsx: Complete estimation results (all models,
-#    all years, with MSEs and CVs)
+# 2. pov_mfh.xlsx: Estimation results for the selected MFH model,
+#    all years, with MSEs and CVs
 # ============================================================
 
 # Back-transform / rebenchmark for mean-welfare-with-log was applied

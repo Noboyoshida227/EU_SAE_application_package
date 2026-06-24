@@ -195,9 +195,13 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
       var_map$strata != "strata") {
     rename_vec <- c(rename_vec, strata = var_map$strata)
   }
-  if (!is.null(var_map$region) && nzchar(var_map$region) &&
-      var_map$region %in% names(survey_raw) && var_map$region != "region") {
-    rename_vec <- c(rename_vec, region = var_map$region)
+  benchmark_level_var <- trimws(as.character(
+    var_map$benchmark_level %||% var_map$region %||% ""
+  ))
+  if (nzchar(benchmark_level_var) &&
+      benchmark_level_var %in% names(survey_raw) &&
+      benchmark_level_var != "region") {
+    rename_vec <- c(rename_vec, region = benchmark_level_var)
   }
   if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
       var_map$hh_size != "hh_size") {
@@ -215,6 +219,14 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
     old_name <- rename_vec[[new_name]]
     if (old_name %in% names(survey_data)) {
       names(survey_data)[names(survey_data) == old_name] <- new_name
+    }
+  }
+  if (nzchar(benchmark_level_var) &&
+      !"region" %in% names(survey_data) &&
+      benchmark_level_var %in% unname(rename_vec)) {
+    copied_from <- names(rename_vec)[match(benchmark_level_var, unname(rename_vec))]
+    if (!is.na(copied_from) && copied_from %in% names(survey_data)) {
+      survey_data$region <- survey_data[[copied_from]]
     }
   }
 
@@ -791,7 +803,7 @@ ui <- fluidPage(
           </td>
         </tr>
         <tr>
-          <td>Diagnostic model</td>
+          <td>Selected MFH model</td>
           <td><code>MFH2</code> / <code>MFH1</code> / <code>MFH3</code></td>
           <td>Which MFH variant drives the Comparison report end-to-end (maps, MCPE change analysis, benchmarked tables). All three are fitted within the multivariate pipeline using the same covariates and sampling variance&ndash;covariance inputs; they differ only in the random-effects structure. UFH is no longer a choice here &mdash; UFH analysis is produced separately by the univariate FH stage (<code>scripts/01_ufh.R</code>).
             <ul style="margin:0.4em 0 0.2em 1.2em; font-size:0.95em;">
@@ -893,18 +905,14 @@ ui <- fluidPage(
       fileInput("shp_file",
         tip_label("Shapefiles (.rds)", "An sf object with domain polygons for poverty mapping. Leave blank to use the default Greek geometries.")),
       checkboxInput("do_benchmark",
-        tip_label("Apply benchmarking", "If checked, UFH and MFH estimates are benchmarked at the selected level. If unchecked, uploaded benchmark files are ignored for the next run."),
+        tip_label("Apply benchmarking", "If checked, UFH and MFH estimates are benchmarked. If unchecked, uploaded benchmark files and benchmark-level mappings are ignored for the next run."),
         value = FALSE),
       conditionalPanel(
         condition = "input.do_benchmark",
-        selectInput("benchmark_level",
-          tip_label("Benchmark level", "Benchmark either to the national total or to regions. Regional benchmarking requires the region variable below."),
-          choices = c("National" = "national", "Region" = "region"),
-          selected = "national")
+        fileInput("regional_benchmark_file",
+          tip_label("Benchmark Target Database (optional)",
+                    "Optional RDS/CSV/XLSX file with benchmark targets by year. Leave blank to estimate targets from the survey using population_weight = weight * household size."))
       ),
-      fileInput("regional_benchmark_file",
-        tip_label("Regional benchmark targets (optional)",
-                  "Optional RDS/CSV/XLSX file with benchmark estimates by selected benchmark level and year. Used only when benchmarking is enabled.")),
       fileInput("population_file",
         tip_label("Domain population sizes (optional)",
                   "Optional RDS/CSV/XLSX file with domain population sizes. Supports long domain-year-population format or wide domain-by-year format; leave blank to estimate domain populations from the survey as sum(weight * household size).")),
@@ -930,9 +938,9 @@ ui <- fluidPage(
       textInput("var_hh_size",
         tip_label("household size", "Column name for household size. Direct poverty-rate estimates use population_weight = weight * household size; when no population file is uploaded, benchmarking also estimates domain populations as sum(weight * household size) by domain and year."),
         "hhsize"),
-      textInput("var_region",
-        tip_label("benchmark region", "Column name for the higher-level region used only when regional benchmarking is enabled. For national benchmarking this can be left as-is."),
-        "region"),
+      textInput("var_benchmark_level",
+        tip_label("benchmark level", "Optional survey column for grouped benchmarking, such as region, NUTS2, or voivodeship. Leave blank for national benchmarking."),
+        ""),
       textInput("var_welfare",
         tip_label("welfare", "Column name for the welfare variable (e.g. income or consumption) used to determine poverty status."),
         "income"),
@@ -1092,7 +1100,7 @@ ui <- fluidPage(
         tip_label("Covariance option", "How the covariance of sampling errors over time is estimated. Available options depend on the variance choice above. 'rho_sm_out' multiplies the national average autocorrelation with outlier-smoothed variances (available with sm_out). 'rho_sm_all' multiplies it with fully smoothed variances (available with sm_all). 'rho_dir' multiplies it with direct variances. 'direct' uses the direct variance-covariance matrix. 'zero' assumes no cross-year sampling correlation."),
         choices = c("rho_sm_out", "rho_dir", "direct", "zero"), selected = "rho_sm_out"),
       selectInput("mfh_diag_model",
-        tip_label("Diagnostic model", "Which MFH variant drives the Comparison report end-to-end (maps, MCPE change analysis, benchmarked tables). MFH1: unstructured random-effects covariance (T(T+1)/2 parameters). MFH2 (default): homoskedastic AR(1), only 2 parameters, easiest to converge. MFH3: heteroskedastic AR(1), T+1 parameters, more flexible but harder to converge. UFH is no longer listed here -- UFH analysis is produced by the univariate FH stage (scripts/01_ufh.R)."),
+        tip_label("Selected MFH model", "Which MFH variant drives the user-facing MFH export and Comparison report end-to-end (maps, MCPE change analysis, benchmarked tables). MFH1: unstructured random-effects covariance (T(T+1)/2 parameters). MFH2 (default): homoskedastic AR(1), only 2 parameters, easiest to converge. MFH3: heteroskedastic AR(1), T+1 parameters, more flexible but harder to converge. UFH is no longer listed here -- UFH analysis is produced by the univariate FH stage (scripts/01_ufh.R)."),
         choices = c("MFH2", "MFH1", "MFH3"), selected = "MFH2"),
       checkboxInput("fit_mfh3",
         tip_label("Try MFH3", "Whether to also fit MFH3 (heteroskedastic AR(1) model). Like MFH2 but allows the random-effects variance to differ by year. More flexible but harder to converge and adds computation time."),
@@ -1171,6 +1179,8 @@ ui <- fluidPage(
         tabPanel("Status",
           h4("Current step"),
           textOutput("status"),
+          h4("Run folder"),
+          verbatimTextOutput("run_location"),
           h4("Run log"),
           verbatimTextOutput("logs"),
           h4("Expected outputs"),
@@ -1220,7 +1230,15 @@ server <- function(input, output, session) {
 
   status    <- reactiveVal("Idle")
   logs      <- reactiveVal("")
-  output_rows <- reactiveVal(data.frame(File = character(), Description = character(), Exists = character(), stringsAsFactors = FALSE))
+  run_location <- reactiveVal("No run started yet.")
+  output_rows <- reactiveVal(data.frame(
+    "Current file" = character(),
+    Description = character(),
+    Exists = character(),
+    "Saved copy" = character(),
+    check.names = FALSE,
+    stringsAsFactors = FALSE
+  ))
 
   # Reactive stores for validation, diagnostics, and brief
   validation_result <- reactiveVal(NULL)
@@ -1256,8 +1274,18 @@ server <- function(input, output, session) {
     }
   })
 
+  # ---- Benchmarking level helpers ----
+  get_benchmark_level_var <- reactive({
+    trimws(input$var_benchmark_level %||% "")
+  })
+
+  get_benchmark_level <- reactive({
+    if (nzchar(get_benchmark_level_var())) "custom" else "national"
+  })
+
   # ---- Build var_map from inputs ----
   get_var_map <- reactive({
+    benchmark_level_var <- get_benchmark_level_var()
     vm <- list(
       year    = input$var_year,
       domain  = input$var_domain,
@@ -1265,7 +1293,8 @@ server <- function(input, output, session) {
       weight  = input$var_weight,
       strata  = input$var_strata %||% "",
       hh_size = input$var_hh_size,
-      region  = input$var_region %||% "region",
+      benchmark_level = benchmark_level_var,
+      region  = benchmark_level_var,
       welfare = input$var_welfare,
       poor    = "poor"
     )
@@ -1275,6 +1304,37 @@ server <- function(input, output, session) {
     }
     vm
   })
+
+  add_benchmark_metadata <- function(bench_list, source, level_label,
+                                     level_variable, enabled) {
+    if (is.null(bench_list)) return(bench_list)
+    lapply(bench_list, function(b) {
+      if (is.null(b)) return(b)
+      b$benchmark_enabled <- isTRUE(enabled)
+      b$benchmark_source <- source
+      b$benchmark_level <- level_label
+      b$benchmark_level_variable <- level_variable %||% ""
+      b
+    })
+  }
+
+  benchmark_metadata_lines <- function(b) {
+    if (is.null(b)) return(character())
+    lines <- character()
+    if (!is.null(b$benchmark_enabled)) {
+      lines <- c(lines, sprintf(
+        "- **Benchmarking:** %s",
+        if (isTRUE(b$benchmark_enabled)) "enabled" else "off"
+      ))
+    }
+    if (!is.null(b$benchmark_level) && nzchar(as.character(b$benchmark_level))) {
+      lines <- c(lines, sprintf("- **Benchmark level:** %s", b$benchmark_level))
+    }
+    if (!is.null(b$benchmark_source) && nzchar(as.character(b$benchmark_source))) {
+      lines <- c(lines, sprintf("- **Benchmark source:** %s", b$benchmark_source))
+    }
+    lines
+  }
 
   # ---- Auto-disable arcsin for FGT(1)/FGT(2) ----
   observeEvent(input$fgt_alpha, {
@@ -1346,6 +1406,7 @@ server <- function(input, output, session) {
   # ---- Outputs ----
   output$status  <- renderText(status())
   output$logs    <- renderText(logs())
+  output$run_location <- renderText(run_location())
   output$outputs <- renderTable(output_rows(), striped = TRUE)
 
   output$preflight_ui <- renderUI({
@@ -1646,7 +1707,7 @@ server <- function(input, output, session) {
       input$regional_benchmark_file, input$population_file,
       input$var_year, input$var_domain, input$var_psu,
       input$var_weight, input$var_strata, input$var_hh_size,
-      input$var_region, input$var_welfare, input$var_povline,
+      input$var_benchmark_level, input$var_welfare, input$var_povline,
       input$rhs_domain, input$shp_domain,
       # Poverty-line config
       input$povline_type, input$povline_numeric,
@@ -1660,7 +1721,7 @@ server <- function(input, output, session) {
       # Which steps will run (changes the readiness scope/messages)
       input$steps,
       # Benchmarking choices affect required variables and outputs.
-      input$do_benchmark, input$benchmark_level,
+      input$do_benchmark,
       input$run_label
     )
     isolate({
@@ -1797,13 +1858,12 @@ server <- function(input, output, session) {
       }
     }
 
-    if (isTRUE(input$do_benchmark) &&
-        identical(input$benchmark_level %||% "national", "region")) {
-      region_var <- var_map$region %||% "region"
-      if (is.null(survey_raw_check) || !region_var %in% names(survey_raw_check)) {
+    benchmark_level_var <- get_benchmark_level_var()
+    if (isTRUE(input$do_benchmark) && nzchar(benchmark_level_var)) {
+      if (is.null(survey_raw_check) || !benchmark_level_var %in% names(survey_raw_check)) {
         year_msgs <- c(year_msgs, sprintf(
-          "Test 0d: ERROR -- Regional benchmarking requires region column '%s' in the survey data. Choose national benchmarking or map the region variable.",
-          region_var
+          "Test 0d: ERROR -- Grouped benchmarking requires benchmark-level column '%s' in the survey data. Leave the benchmark-level mapping blank for national benchmarking.",
+          benchmark_level_var
         ))
       }
     }
@@ -1884,6 +1944,7 @@ server <- function(input, output, session) {
     llm_interp(NULL)
     llm_brief(NULL)
     normality_eval(NULL)
+    run_location("Preparing run folder...")
 
     # Build ordered list of pipeline stages
     pipeline_stages <- "Validation"
@@ -1921,6 +1982,17 @@ server <- function(input, output, session) {
     }
     run_dir <- file.path("app_runs", run_dir_name)
     dir.create(run_dir, recursive = TRUE, showWarnings = FALSE)
+    run_dir_abs <- normalizePath(run_dir, winslash = "/", mustWork = FALSE)
+    run_outputs_abs <- normalizePath(file.path(run_dir, "outputs"),
+                                     winslash = "/", mustWork = FALSE)
+    run_location(paste(
+      paste("Run folder:", run_dir_abs),
+      paste("Archived outputs:", run_outputs_abs),
+      "Current working outputs are also written to: outputs/",
+      sep = "\n"
+    ))
+    append_log(paste("Run folder:", run_dir_abs))
+    append_log(paste("Archived outputs will be saved to:", run_outputs_abs))
 
     survey_path <- resolve_upload(input$survey_file)
     rhs_path    <- resolve_upload(input$rhs_file)
@@ -1942,6 +2014,27 @@ server <- function(input, output, session) {
     mfh_candidates_y1 <- split_csv(input$mfh_candidates_y1)
     mfh_candidates_y2 <- split_csv(input$mfh_candidates_y2)
     var_map        <- get_var_map()
+    benchmark_level <- get_benchmark_level()
+    benchmark_level_var <- get_benchmark_level_var()
+    benchmark_target_uploaded <- isTRUE(input$do_benchmark) &&
+      !is.null(regional_benchmark_path) &&
+      nzchar(regional_benchmark_path %||% "")
+    benchmark_source_label <- if (!isTRUE(input$do_benchmark)) {
+      "benchmarking off"
+    } else if (benchmark_target_uploaded) {
+      "Benchmark Target Database"
+    } else {
+      "survey direct"
+    }
+    benchmark_level_label <- if (!isTRUE(input$do_benchmark)) {
+      "not applied"
+    } else if (identical(benchmark_level, "custom")) {
+      paste0("grouped by ", benchmark_level_var)
+    } else {
+      "national"
+    }
+    append_log(paste("Benchmark level:", benchmark_level_label))
+    append_log(paste("Benchmark source:", benchmark_source_label))
 
     # ---- Step 1: Validate input data ----
     advance_progress("Validation", "Checking input data")
@@ -2045,13 +2138,12 @@ server <- function(input, output, session) {
         }
       }
 
-      if (isTRUE(input$do_benchmark) &&
-          identical(input$benchmark_level %||% "national", "region")) {
-        region_var <- var_map$region %||% "region"
-        if (is.null(survey_raw_check) || !region_var %in% names(survey_raw_check)) {
+      benchmark_level_var <- get_benchmark_level_var()
+      if (isTRUE(input$do_benchmark) && nzchar(benchmark_level_var)) {
+        if (is.null(survey_raw_check) || !benchmark_level_var %in% names(survey_raw_check)) {
           year_msgs <- c(year_msgs, sprintf(
-            "Test 0d: ERROR -- Regional benchmarking requires region column '%s' in the survey data. Choose national benchmarking or map the region variable.",
-            region_var
+            "Test 0d: ERROR -- Grouped benchmarking requires benchmark-level column '%s' in the survey data. Leave the benchmark-level mapping blank for national benchmarking.",
+            benchmark_level_var
           ))
         }
       }
@@ -2131,8 +2223,10 @@ server <- function(input, output, session) {
           diag_model     = input$mfh_diag_model,
           fit_mfh3       = isTRUE(input$fit_mfh3),
           do_benchmark   = isTRUE(input$do_benchmark),
-          benchmark_level = input$benchmark_level %||% "national",
-          regional_benchmark_path = regional_benchmark_path,
+          benchmark_level = benchmark_level,
+          benchmark_level_variable = benchmark_level_var,
+          benchmark_source = benchmark_source_label,
+          benchmark_target_path = regional_benchmark_path,
           population_path         = population_path,
           candidate_vars_y1 = mfh_candidates_y1,
           candidate_vars_y2 = mfh_candidates_y2
@@ -2163,6 +2257,13 @@ server <- function(input, output, session) {
         diag_list[[yr_key]]  <- s$diag
         bench_list[[yr_key]] <- s$bench
       }
+      bench_list <- add_benchmark_metadata(
+        bench_list,
+        source = benchmark_source_label,
+        level_label = benchmark_level_label,
+        level_variable = benchmark_level_var,
+        enabled = isTRUE(input$do_benchmark)
+      )
       diagnostics_data(list(diag = diag_list, bench = bench_list))
 
       # Generate template brief (no LLM)
@@ -2245,7 +2346,11 @@ server <- function(input, output, session) {
       shp_path                = shp_path    %||% "data/geometries.rds",
       population_path         = population_path,
       do_benchmark            = isTRUE(input$do_benchmark),
-      benchmark_level         = input$benchmark_level %||% "national",
+      benchmark_level         = benchmark_level,
+      benchmark_level_variable = benchmark_level_var,
+      benchmark_source        = benchmark_source_label,
+      benchmark_target_path   = regional_benchmark_path,
+      regional_benchmark_path = regional_benchmark_path,
       var_map                 = var_map,
       rhs_domain              = input$rhs_domain,
       shp_domain              = input$shp_domain,
@@ -2292,9 +2397,12 @@ server <- function(input, output, session) {
       rhs_path                = rhs_path    %||% "data/sae_data.rds",
       shp_path                = shp_path    %||% "data/geometries.rds",
       regional_benchmark_path = regional_benchmark_path,
+      benchmark_target_path   = regional_benchmark_path,
       population_path         = population_path,
       do_benchmark            = isTRUE(input$do_benchmark),
-      benchmark_level         = input$benchmark_level %||% "national",
+      benchmark_level         = benchmark_level,
+      benchmark_level_variable = benchmark_level_var,
+      benchmark_source        = benchmark_source_label,
       var_map                 = var_map,
       ic_criterion            = input$mfh_ic_criterion,
       rhs_domain              = input$rhs_domain,
@@ -2343,7 +2451,11 @@ server <- function(input, output, session) {
       run_label       = run_label_raw,
       benchmarking    = list(
         enabled = isTRUE(input$do_benchmark),
-        level   = input$benchmark_level %||% "national"
+        level   = benchmark_level,
+        level_variable = benchmark_level_var,
+        level_label = benchmark_level_label,
+        source = benchmark_source_label,
+        target_path = regional_benchmark_path
       ),
       run             = list(steps = input$steps),
       ufh             = ufh_cfg,
@@ -2501,12 +2613,38 @@ server <- function(input, output, session) {
     if (any(ai_note_idx) && !ai_note_eligible) {
       exists_status[ai_note_idx] <- "Not requested (AI off)"
     }
-    output_rows(data.frame(
-      File        = files,
-      Description = descriptions,
-      Exists      = exists_status,
-      stringsAsFactors = FALSE
-    ))
+    update_output_table <- function(archive_dir = NULL) {
+      exists_status <- ifelse(file.exists(files), "TRUE", "FALSE")
+      if (any(ai_note_idx) && !ai_note_eligible) {
+        exists_status[ai_note_idx] <- "Not requested (AI off)"
+      }
+
+      current_files <- normalizePath(files, winslash = "/", mustWork = FALSE)
+      saved_copy <- rep("Pending until run completes", length(files))
+      if (!is.null(archive_dir) && dir.exists(archive_dir)) {
+        archived_files <- file.path(
+          archive_dir,
+          sub("^outputs[/\\\\]?", "", files)
+        )
+        saved_copy <- ifelse(
+          file.exists(archived_files),
+          normalizePath(archived_files, winslash = "/", mustWork = FALSE),
+          ifelse(exists_status == "Not requested (AI off)",
+                 "Not requested (AI off)",
+                 "Not archived")
+        )
+      }
+
+      output_rows(data.frame(
+        "Current file" = current_files,
+        Description = descriptions,
+        Exists = exists_status,
+        "Saved copy" = saved_copy,
+        check.names = FALSE,
+        stringsAsFactors = FALSE
+      ))
+    }
+    update_output_table()
 
     # Try to enrich diagnostics from pipeline output files
     pipeline_out <- read_pipeline_outputs()
@@ -2543,6 +2681,21 @@ server <- function(input, output, session) {
           mfh_diag[[yr_key]] <- d
         }
       }
+
+      ufh_bench <- add_benchmark_metadata(
+        ufh_bench,
+        source = benchmark_source_label,
+        level_label = benchmark_level_label,
+        level_variable = benchmark_level_var,
+        enabled = isTRUE(input$do_benchmark)
+      )
+      mfh_bench <- add_benchmark_metadata(
+        mfh_bench,
+        source = benchmark_source_label,
+        level_label = benchmark_level_label,
+        level_variable = benchmark_level_var,
+        enabled = isTRUE(input$do_benchmark)
+      )
 
       # Store enriched data (keep UFH as primary for backward compat)
       if (length(ufh_bench) > 0) dd$bench <- ufh_bench
@@ -2608,6 +2761,7 @@ server <- function(input, output, session) {
           b <- bench_list[[yr_name]]
           if (!is.null(b)) {
             bl <- c(bl, "#### Benchmark Summary", "")
+            bl <- c(bl, benchmark_metadata_lines(b))
             if (!is.null(b$estimate_range))
               bl <- c(bl, sprintf("- **Estimate range:** [%.4f, %.4f]",
                                    b$estimate_range[1], b$estimate_range[2]))
@@ -2684,6 +2838,7 @@ server <- function(input, output, session) {
           b <- dd$bench[[yr_name]]
           if (!is.null(b)) {
             diag_lines <- c(diag_lines, "### Benchmark Summary", "")
+            diag_lines <- c(diag_lines, benchmark_metadata_lines(b))
             if (!is.null(b$estimate_range))
               diag_lines <- c(diag_lines, sprintf("- **Estimate range:** [%.4f, %.4f]",
                                                    b$estimate_range[1], b$estimate_range[2]))
@@ -2715,6 +2870,25 @@ server <- function(input, output, session) {
       status("Rendering final report...")
       append_log("Rendering final_report.html from report.Rmd...")
       tryCatch({
+        dir.create("outputs/data", showWarnings = FALSE, recursive = TRUE)
+        saveRDS(
+          list(
+            run_id = run_id,
+            run_label = run_label_raw,
+            run_folder = run_dir_abs,
+            archived_outputs = run_outputs_abs,
+            mfh_selected_model = input$mfh_diag_model %||% "MFH2",
+            benchmarking = list(
+              enabled = isTRUE(input$do_benchmark),
+              level = benchmark_level,
+              level_label = benchmark_level_label,
+              level_variable = benchmark_level_var,
+              source = benchmark_source_label,
+              target_path = regional_benchmark_path
+            )
+          ),
+          file = "outputs/data/run_metadata.rds"
+        )
         if (!requireNamespace("rmarkdown", quietly = TRUE)) {
           append_log("WARNING: rmarkdown package not installed; skipping report rendering.")
         } else if (!file.exists("report.Rmd")) {
@@ -2770,6 +2944,13 @@ server <- function(input, output, session) {
           file.copy(output_files, archive_dir, recursive = TRUE,
                     overwrite = TRUE, copy.date = TRUE)
         }
+        update_output_table(archive_dir)
+        run_location(paste(
+          paste("Run folder:", run_dir_abs),
+          paste("Archived outputs:", normalizePath(archive_dir, winslash = "/", mustWork = FALSE)),
+          "Status: completed successfully",
+          sep = "\n"
+        ))
         append_log(paste(
           "Archived run outputs:",
           normalizePath(archive_dir, winslash = "/", mustWork = FALSE)
@@ -2782,6 +2963,12 @@ server <- function(input, output, session) {
       append_log("Pipeline finished.")
     } else {
       status("Run failed")
+      run_location(paste(
+        paste("Run folder:", run_dir_abs),
+        "Archived outputs: not created because the run failed",
+        "Check run.log in the run folder for details.",
+        sep = "\n"
+      ))
       progress$set(value = n_steps, detail = "Failed")
       append_log(paste("ERROR:", err_msg))
     }
@@ -2982,6 +3169,42 @@ server <- function(input, output, session) {
 
 .app <- shinyApp(ui, server)
 
+.run_app_with_port_fallback <- function(app_dir, host = "127.0.0.1",
+                                        preferred = 7777L,
+                                        max_tries = 100L,
+                                        launch.browser = TRUE) {
+  env_port <- suppressWarnings(as.integer(Sys.getenv("EU_SAE_APP_PORT", unset = "")))
+  candidates <- preferred + seq.int(0L, max_tries - 1L)
+  if (!is.na(env_port) && env_port > 0L) {
+    candidates <- unique(c(env_port, candidates))
+  }
+
+  for (port in candidates) {
+    message("Launching Shiny app at http://", host, ":", port, " ...")
+    message("Open that URL in your browser. Press Ctrl+C in this terminal to stop.")
+    ok <- tryCatch({
+      shiny::runApp(
+        appDir = app_dir,
+        host = host,
+        port = port,
+        launch.browser = launch.browser
+      )
+      TRUE
+    }, error = function(e) {
+      msg <- conditionMessage(e)
+      if (grepl("address already in use|Failed to create server|createTcpServer",
+                msg, ignore.case = TRUE)) {
+        message("Port ", port, " is already in use; trying the next port.")
+        FALSE
+      } else {
+        stop(e)
+      }
+    })
+    if (isTRUE(ok)) return(invisible(TRUE))
+  }
+  stop("Could not find an available local port for the dashboard.", call. = FALSE)
+}
+
 # When run from RStudio's "Run App" button or via shiny::runApp(),
 # the app object is auto-launched. When run via `Rscript app.R` from a
 # terminal, R is non-interactive and we must launch the server explicitly.
@@ -2995,9 +3218,12 @@ server <- function(input, output, session) {
 # causing infinite recursion.
 if (!interactive() && !nzchar(Sys.getenv("EU_SAE_APP_LAUNCHED"))) {
   Sys.setenv(EU_SAE_APP_LAUNCHED = "1")
-  message("Launching Shiny app at http://127.0.0.1:7777 ...")
-  message("Open that URL in your browser. Press Ctrl+C in this terminal to stop.")
-  shiny::runApp(appDir = .app_dir, host = "127.0.0.1", port = 7777, launch.browser = TRUE)
+  .run_app_with_port_fallback(
+    app_dir = .app_dir,
+    host = "127.0.0.1",
+    preferred = 7777L,
+    launch.browser = TRUE
+  )
 } else {
   .app
 }

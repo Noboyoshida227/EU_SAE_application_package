@@ -158,7 +158,7 @@ generate_data_note <- function(validation,
     }
     ln <- c(ln, sprintf("- **Variance option:** %s", mfh_options$var_choice %||% "N/A"))
     ln <- c(ln, sprintf("- **Covariance option:** %s", mfh_options$cov_choice %||% "N/A"))
-    ln <- c(ln, sprintf("- **Diagnostic model:** %s", mfh_options$diag_model %||% "N/A"))
+    ln <- c(ln, sprintf("- **Selected MFH model:** %s", mfh_options$diag_model %||% "N/A"))
     ln <- c(ln, sprintf("- **Fit MFH3:** %s",
                          if (isTRUE(mfh_options$fit_mfh3)) "Yes" else "No"))
     has_y1 <- !is.null(mfh_options$candidate_vars_y1) && length(mfh_options$candidate_vars_y1) > 0
@@ -253,6 +253,16 @@ format_model_section <- function(section_num, model_label, diagnostics,
   for (yr_name in names(bench_summary)) {
     b <- bench_summary[[yr_name]]
     lines <- c(lines, sprintf("   Year: %s", yr_name))
+    if (!is.null(b$benchmark_enabled)) {
+      lines <- c(lines, sprintf("   Benchmarking: %s",
+                                 if (isTRUE(b$benchmark_enabled)) "enabled" else "off"))
+    }
+    if (!is.null(b$benchmark_level) && nzchar(as.character(b$benchmark_level))) {
+      lines <- c(lines, sprintf("   Benchmark level: %s", b$benchmark_level))
+    }
+    if (!is.null(b$benchmark_source) && nzchar(as.character(b$benchmark_source))) {
+      lines <- c(lines, sprintf("   Benchmark source: %s", b$benchmark_source))
+    }
     if (!is.null(b$estimate_range)) {
       lines <- c(lines, sprintf("   Estimate range: [%.4f, %.4f]",
                                  b$estimate_range[1], b$estimate_range[2]))

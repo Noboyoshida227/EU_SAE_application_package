@@ -28,8 +28,8 @@ validate_app_config <- function(cfg) {
   bench_enabled <- isTRUE(cfg$benchmarking$enabled)
   bench_level <- cfg$benchmarking$level %||% cfg$mfh$benchmark_level %||%
     cfg$ufh$benchmark_level %||% "national"
-  if (!bench_level %in% c("national", "region")) {
-    errs <- c(errs, "`benchmarking.level` must be one of: national, region.")
+  if (!bench_level %in% c("national", "custom", "region")) {
+    errs <- c(errs, "`benchmarking.level` must be one of: national, custom.")
   }
 
   mfh_var <- cfg$mfh$var_choice %||% "sm_out"
@@ -42,7 +42,10 @@ validate_app_config <- function(cfg) {
     errs <- c(errs, "`mfh.cov_choice` must be one of: direct, rho_dir, rho_sm_out, rho_sm_all, zero.")
   }
   optional_paths <- c(
+    benchmark_target_path = cfg$benchmarking$target_path,
+    ufh_benchmark_target_path = cfg$ufh$benchmark_target_path %||% cfg$ufh$regional_benchmark_path,
     mfh_regional_benchmark_path = cfg$mfh$regional_benchmark_path,
+    mfh_benchmark_target_path = cfg$mfh$benchmark_target_path,
     mfh_population_path = cfg$mfh$population_path,
     ufh_population_path = cfg$ufh$population_path
   )
@@ -284,9 +287,13 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
       var_map$strata != "strata") {
     rename_vec <- c(rename_vec, strata = var_map$strata)
   }
-  if (!is.null(var_map$region) && nzchar(var_map$region) &&
-      var_map$region %in% names(survey_raw) && var_map$region != "region") {
-    rename_vec <- c(rename_vec, region = var_map$region)
+  benchmark_level_var <- trimws(as.character(
+    var_map$benchmark_level %||% var_map$region %||% ""
+  ))
+  if (nzchar(benchmark_level_var) &&
+      benchmark_level_var %in% names(survey_raw) &&
+      benchmark_level_var != "region") {
+    rename_vec <- c(rename_vec, region = benchmark_level_var)
   }
   if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
       var_map$hh_size != "hh_size") {
@@ -304,6 +311,14 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
     old_name <- rename_vec[[new_name]]
     if (old_name %in% names(survey_data)) {
       names(survey_data)[names(survey_data) == old_name] <- new_name
+    }
+  }
+  if (nzchar(benchmark_level_var) &&
+      !"region" %in% names(survey_data) &&
+      benchmark_level_var %in% unname(rename_vec)) {
+    copied_from <- names(rename_vec)[match(benchmark_level_var, unname(rename_vec))]
+    if (!is.na(copied_from) && copied_from %in% names(survey_data)) {
+      survey_data$region <- survey_data[[copied_from]]
     }
   }
 

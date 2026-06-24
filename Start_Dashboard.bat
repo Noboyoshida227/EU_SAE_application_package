@@ -70,8 +70,8 @@ echo.
 REM ---- Launch the dashboard ---------------------------------
 REM  - Sources install_packages.R if present (installs missing packages on first run)
 REM  - Then sources app.R directly. app.R contains its own non-interactive
-REM    launcher (shiny::runApp(.app, port=7777, launch.browser=TRUE)) that
-REM    fires automatically under Rscript. Calling source('app.R') instead
+REM    launcher, which prefers port 7777 and automatically falls back to the
+REM    next free local port if 7777 is already in use. Calling source('app.R') instead
 REM    of shiny::runApp(appDir=...) avoids a double-runApp nesting that
 REM    breaks static asset serving (www/eu_poverty_map.png and friends).
 "%RSCRIPT%" -e "if (file.exists('install_packages.R')) source('install_packages.R'); source('app.R')"

@@ -69,6 +69,8 @@ pov_cmp <- tryCatch(read_excel(file.path(data_dir, "pov_comparison_detailed.xlsx
                      error = function(e) NULL)
 mfh_artifacts <- tryCatch(readRDS(file.path(data_dir, "mfh_artifacts.rds")),
                           error = function(e) NULL)
+run_meta <- tryCatch(readRDS(file.path(data_dir, "run_metadata.rds")),
+                     error = function(e) NULL)
 
 sig_summary <- safe_read_csv("significance_summary.csv",
                               file.path(fig_dir, "tables"))
@@ -87,6 +89,40 @@ if (!is.null(exec_summary)) {
 if (!is.null(sig_summary)) {
   kable(sig_summary, digits = 0,
         caption = "Number of domains with statistically significant changes")
+}
+```
+
+# Run Setup
+
+```{r run-setup}
+if (!is.null(run_meta)) {
+  bm <- run_meta$benchmarking %||% list()
+  setup_tbl <- data.frame(
+    Item = c(
+      "Run ID",
+      "Run label",
+      "Run folder",
+      "Archived outputs",
+      "Benchmarking",
+      "Benchmark level",
+      "Benchmark source",
+      "Benchmark target file",
+      "Selected MFH model"
+    ),
+    Value = c(
+      run_meta$run_id %||% "",
+      run_meta$run_label %||% "",
+      run_meta$run_folder %||% "",
+      run_meta$archived_outputs %||% "",
+      if (isTRUE(bm$enabled)) "enabled" else "off",
+      bm$level_label %||% bm$level %||% "",
+      bm$source %||% "",
+      bm$target_path %||% "",
+      run_meta$mfh_selected_model %||% ""
+    ),
+    check.names = FALSE
+  )
+  kable(setup_tbl, caption = "Run configuration and output locations")
 }
 ```
 
@@ -130,6 +166,21 @@ if (!is.null(mfh_status) && mfh_status$bad_rows > 0 && !mfh_not_executed) {
     mfh_status$bad_rows,
     mfh_status$n_domains,
     mfh_status$n_fitted
+  ))
+}
+
+if (!is.null(mfh_status) && !mfh_not_executed) {
+  cat(sprintf(
+    paste0(
+      "<div class=\"alert alert-info\">",
+      "<strong>Selected MFH variant:</strong> %s. ",
+      "The displayed MFH comparison tables and plots use the selected model export ",
+      "from <code>pov_mfh.xlsx</code>. Other MFH variants may be fitted internally ",
+      "for diagnostics/model selection, but they are not exposed in the user-facing ",
+      "MFH estimate export.",
+      "</div>\n"
+    ),
+    mfh_status$diag_model
   ))
 }
 

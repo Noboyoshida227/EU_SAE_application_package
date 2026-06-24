@@ -112,7 +112,15 @@ benchmark_level <- cfg_or_default(
   ufh_cfg$benchmark_level,
   .app_cfg$benchmarking$level %||% "national"
 )
-if (!benchmark_level %in% c("national", "region")) benchmark_level <- "national"
+if (!benchmark_level %in% c("national", "custom", "region")) benchmark_level <- "national"
+benchmark_target_path <- cfg_or_default(
+  ufh_cfg$benchmark_target_path %||% ufh_cfg$regional_benchmark_path,
+  .app_cfg$benchmarking$target_path %||% ""
+)
+benchmark_level_var_cfg <- trimws(as.character(cfg_or_default(
+  ufh_cfg$benchmark_level_variable,
+  .app_cfg$benchmarking$level_variable %||% ""
+)))
 
 cat("UFH data paths:\n")
 cat("  survey:", survey_path, "\n")
@@ -132,13 +140,32 @@ survey_raw <- survey_raw %>% select(-any_of("provlab"))
 default_var_map <- list(
   year = "year", domain = "prov", psu = "ea_id",
   weight = "weight", strata = "", hh_size = "hhsize",
-  region = "region",
+  benchmark_level = "", region = "",
   welfare = "income", povline = "povline", poor = "poor"
 )
 if (!is.null(ufh_cfg$var_map)) {
   var_map <- modifyList(default_var_map, ufh_cfg$var_map)
 } else {
   var_map <- default_var_map
+}
+mapped_benchmark_level_var <- benchmark_level_var_cfg
+if (!nzchar(mapped_benchmark_level_var)) {
+  mapped_benchmark_level_var <- trimws(as.character(
+    var_map$benchmark_level %||% var_map$region %||% ""
+  ))
+}
+if (identical(benchmark_level, "region") && !nzchar(mapped_benchmark_level_var)) {
+  mapped_benchmark_level_var <- "region"
+}
+if (benchmark_level %in% c("custom", "region")) {
+  if (!nzchar(mapped_benchmark_level_var)) {
+    benchmark_level <- "national"
+  }
+  var_map$benchmark_level <- mapped_benchmark_level_var
+  var_map$region <- mapped_benchmark_level_var
+} else {
+  var_map$benchmark_level <- ""
+  var_map$region <- ""
 }
 
 # ---- Harmonize variable names ----
@@ -150,9 +177,11 @@ if (!is.null(var_map$strata) && nzchar(var_map$strata) &&
     var_map$strata %in% names(survey_raw) && var_map$strata != "strata") {
   rename_cols <- c(rename_cols, strata = var_map$strata)
 }
-if (!is.null(var_map$region) && nzchar(var_map$region) &&
-    var_map$region %in% names(survey_raw) && var_map$region != "region") {
-  rename_cols <- c(rename_cols, region = var_map$region)
+if (!is.null(var_map$benchmark_level) && nzchar(var_map$benchmark_level) &&
+    var_map$benchmark_level %in% names(survey_raw) &&
+    var_map$benchmark_level != "region" &&
+    !var_map$benchmark_level %in% unname(rename_cols)) {
+  rename_cols <- c(rename_cols, region = var_map$benchmark_level)
 }
 # Only rename povline column when it comes from data and we are running
 # the poverty indicator. Mean-welfare runs ignore the poverty line entirely.
@@ -165,6 +194,14 @@ if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
   rename_cols <- c(rename_cols, hh_size = var_map$hh_size)
 }
 survey_all <- survey_raw %>% rename(!!!rename_cols)
+if (!is.null(var_map$benchmark_level) && nzchar(var_map$benchmark_level) &&
+    !"region" %in% names(survey_all) &&
+    var_map$benchmark_level %in% unname(rename_cols)) {
+  copied_from <- names(rename_cols)[match(var_map$benchmark_level, unname(rename_cols))]
+  if (!is.na(copied_from) && copied_from %in% names(survey_all)) {
+    survey_all$region <- survey_all[[copied_from]]
+  }
+}
 # When the poverty line is a numeric constant, create the column (poverty only)
 if (identical(indicator_type, "poverty") && povline_type == "numeric") {
   survey_all$povline <- as.numeric(povline_cfg)
@@ -420,6 +457,118 @@ make_sae_design <- function(data) {
   }
 }
 
+.read_optional_benchmark_table <- function(path) {
+  if (is.null(path) || length(path) == 0 || !nzchar(path)) return(NULL)
+  if (!file.exists(path)) stop("Benchmark Target Database not found: ", path)
+  ext <- tolower(tools::file_ext(path))
+  if (ext == "rds") {
+    readRDS(path)
+  } else if (ext %in% c("rda", "rdata")) {
+    load_env <- new.env(parent = emptyenv())
+    loaded <- load(path, envir = load_env)
+    if (length(loaded) != 1) {
+      stop("Benchmark Target Database .RData/.rda file must contain exactly one object.")
+    }
+    load_env[[loaded[1]]]
+  } else if (ext %in% c("csv", "txt")) {
+    read.csv(path, check.names = FALSE)
+  } else if (ext %in% c("xlsx", "xls")) {
+    if (!requireNamespace("readxl", quietly = TRUE)) {
+      stop("Package 'readxl' is required to read Excel benchmark target inputs.")
+    }
+    readxl::read_excel(path)
+  } else {
+    stop("Unsupported Benchmark Target Database format: ", path)
+  }
+}
+
+.pick_col <- function(nms, candidates) {
+  candidates <- candidates[nzchar(candidates)]
+  lower_nms <- tolower(nms)
+  hit <- match(tolower(candidates), lower_nms)
+  hit <- hit[!is.na(hit)]
+  if (length(hit) == 0) NULL else nms[hit[1]]
+}
+
+.targets_from_optional_benchmark <- function(path, group_vec, years_keep,
+                                             level_col = "") {
+  obj <- .read_optional_benchmark_table(path)
+  if (is.null(obj)) return(NULL)
+
+  group_ids <- sort(unique(as.character(group_vec[!is.na(group_vec)])))
+  year_chr <- as.character(years_keep)
+
+  if (is.matrix(obj)) {
+    mat <- obj
+    if (is.null(rownames(mat))) stop("Benchmark target matrix must have group row names.")
+    missing_groups <- setdiff(group_ids, rownames(mat))
+    if (length(missing_groups) > 0) {
+      stop("Benchmark target matrix is missing group(s): ",
+           paste(missing_groups, collapse = ", "))
+    }
+    mat <- mat[group_ids, , drop = FALSE]
+    if (ncol(mat) != length(years_keep)) {
+      stop("Benchmark target matrix must have one column per analysis year.")
+    }
+    storage.mode(mat) <- "double"
+    colnames(mat) <- year_chr
+    if (any(!is.finite(mat))) stop("Benchmark target matrix contains missing/non-finite targets.")
+    return(mat)
+  }
+
+  df <- as.data.frame(obj, check.names = FALSE)
+  nms <- names(df)
+  group_col <- .pick_col(nms, c(level_col, "benchmark_level", "level",
+                                "group", "group_id", "region", "reg", "region_id"))
+  year_col <- .pick_col(nms, c("year", "time", "period"))
+  value_col <- .pick_col(nms, c("benchmark", "target", "B_r",
+                                "benchmark_target", "regional_benchmark",
+                                "direct", "direct_rate", "poverty_rate"))
+  if (is.null(group_col)) {
+    if (length(group_ids) == 1L) {
+      group_col <- ".benchmark_level"
+      df[[group_col]] <- group_ids[1]
+    } else {
+      stop("Benchmark Target Database must contain a benchmark-level column ",
+           "(for example '",
+           if (nzchar(level_col)) level_col else "benchmark_level",
+           "') or matrix row names.")
+    }
+  }
+
+  mat <- matrix(NA_real_, nrow = length(group_ids), ncol = length(years_keep),
+                dimnames = list(group_ids, year_chr))
+
+  if (!is.null(year_col) && !is.null(value_col)) {
+    for (tt in seq_along(years_keep)) {
+      idx <- as.character(df[[year_col]]) == year_chr[tt]
+      ids <- as.character(df[[group_col]][idx])
+      vals <- as.numeric(df[[value_col]][idx])
+      mat[intersect(group_ids, ids), tt] <- vals[match(intersect(group_ids, ids), ids)]
+    }
+  } else {
+    for (tt in seq_along(years_keep)) {
+      candidates <- c(
+        year_chr[tt],
+        paste0("B_r_", year_chr[tt]),
+        paste0("benchmark_", year_chr[tt]),
+        paste0("target_", year_chr[tt]),
+        paste0("direct_", year_chr[tt]),
+        paste0("poor_", year_chr[tt])
+      )
+      col <- .pick_col(nms, candidates)
+      if (is.null(col)) stop("Benchmark Target Database is missing a column for year ", year_chr[tt], ".")
+      ids <- as.character(df[[group_col]])
+      mat[group_ids, tt] <- as.numeric(df[[col]][match(group_ids, ids)])
+    }
+  }
+
+  if (any(!is.finite(mat))) {
+    stop("Benchmark Target Database is missing targets for at least one benchmark level/year.")
+  }
+  mat
+}
+
 # ---- Benchmark grouping map ----------------------------------------------
 if (do_benchmark) {
   if (identical(benchmark_level, "national")) {
@@ -432,10 +581,16 @@ if (do_benchmark) {
       select(domain, region) |>
       distinct()
   } else {
-    stop("Regional benchmarking requires a mapped region column in the survey data. ",
-         "Choose national benchmarking or map the region variable.")
+    stop("Grouped benchmarking requires mapped benchmark-level column '",
+         var_map$benchmark_level,
+         "' in the survey data. Leave the benchmark-level mapping blank for national benchmarking.")
   }
-  cat("UFH benchmarking enabled at level:", benchmark_level, "\n")
+  bench_desc <- if (identical(benchmark_level, "national")) {
+    "national"
+  } else {
+    paste0("grouped by ", var_map$benchmark_level)
+  }
+  cat("UFH benchmarking enabled at level:", bench_desc, "\n")
 } else {
   region_map <- NULL
   cat("UFH benchmarking disabled by configuration.\n")
@@ -486,7 +641,9 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
                         formula_override = NULL,
                         var_choice = "sm_out",
                         do_benchmark = FALSE,
-                        population_path = "") {
+                        population_path = "",
+                        benchmark_target_path = "",
+                        benchmark_level_variable = "") {
 
   # Back-transformation is only meaningful under arcsin. If the caller passes
   # "bc"/"naive" together with transformation = "no", silently drop it so we
@@ -718,19 +875,44 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
       left_join(pop_dt |> mutate(ratio_n = Nd / sum(Nd)), by = "domain") |>
       left_join(region_map, by = "domain")
 
-    # Benchmark-level targets: weighted avg of direct domain rates
-    region_benchmarks <- fh_dt |>
+    external_benchmark_mat <- .targets_from_optional_benchmark(
+      benchmark_target_path,
+      group_vec = region_map$region,
+      years_keep = years_keep,
+      level_col = benchmark_level_variable
+    )
+
+    # Benchmark-level targets: uploaded targets if provided; otherwise the
+    # population-weighted average of direct domain rates.
+    direct_region_benchmarks <- fh_dt |>
       filter(!is.na(direct_povrate)) |>
       group_by(region) |>
       summarize(
         n_provs = n(),
         B_r     = weighted.mean(direct_povrate, Nd, na.rm = TRUE),
+        source  = "survey direct",
         .groups = "drop"
       )
+    if (!is.null(external_benchmark_mat)) {
+      external_region_benchmarks <- tibble::tibble(
+        region = rownames(external_benchmark_mat),
+        B_r = as.numeric(external_benchmark_mat[, as.character(yr)]),
+        source = "Benchmark Target Database"
+      )
+      region_benchmarks <- direct_region_benchmarks |>
+        select(region, n_provs) |>
+        left_join(external_region_benchmarks, by = "region")
+      cat("Using Benchmark Target Database for UFH benchmarking:", benchmark_target_path, "\n")
+    } else {
+      region_benchmarks <- direct_region_benchmarks
+    }
     cat("\nUFH benchmark targets (yr =", yr, "):\n")
     print(region_benchmarks)
 
-    region_df <- fh_dt |> select(domain, region, Nd, direct_povrate)
+    region_df <- fh_dt |>
+      left_join(region_benchmarks |> select(region, B_r), by = "region") |>
+      mutate(direct_povrate = if_else(is.finite(B_r), B_r, direct_povrate)) |>
+      select(domain, region, Nd, direct_povrate)
     fh_bench  <- bench_regional(
       model = fh_model,
       region_df = region_df,
@@ -1020,7 +1202,9 @@ res_y1 <- run_fh_year(yr = years_keep[1],
                       formula_override = ufh_formula_override_y1,
                       var_choice = ufh_var_choice,
                       do_benchmark = do_benchmark,
-                      population_path = population_path)
+                      population_path = population_path,
+                      benchmark_target_path = benchmark_target_path,
+                      benchmark_level_variable = var_map$benchmark_level)
 
 fh_results_list[[as.character(years_keep[1])]] <- res_y1$pov_fh
 
@@ -1282,7 +1466,9 @@ res_y2 <- run_fh_year(yr = years_keep[2],
                       formula_override = ufh_formula_override_y2,
                       var_choice = ufh_var_choice,
                       do_benchmark = do_benchmark,
-                      population_path = population_path)
+                      population_path = population_path,
+                      benchmark_target_path = benchmark_target_path,
+                      benchmark_level_variable = var_map$benchmark_level)
 
 fh_results_list[[as.character(years_keep[2])]] <- res_y2$pov_fh
 
