@@ -1172,6 +1172,26 @@ plot_mse_comparison <- function(pov_fh_year, year_label) {
     theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6))
 }
 build_mse_decomposition <- function(res_year) {
+  if (!isTRUE(do_benchmark) ||
+      !"region" %in% names(res_year$fh_dt) ||
+      !"Nd" %in% names(res_year$fh_dt)) {
+    return(
+      res_year$pov_fh %>%
+        select(domain, Direct_MSE, FH_MSE, FH_Bench_MSE) %>%
+        mutate(
+          region = "not benchmarked",
+          Bench_gt_Direct = FH_Bench_MSE > Direct_MSE,
+          Bench_gt_FH = FH_Bench_MSE > FH_MSE,
+          Bench_minus_Direct = FH_Bench_MSE - Direct_MSE,
+          Bench_minus_FH = FH_Bench_MSE - FH_MSE,
+          Bench_to_Direct = FH_Bench_MSE / Direct_MSE,
+          Bench_to_FH = FH_Bench_MSE / FH_MSE,
+          lambda_r = NA_real_,
+          abs_lambda_shift = NA_real_
+        )
+    )
+  }
+
   region_diag <- res_year$fh_dt %>%
     select(domain, region, Nd, direct_povrate) %>%
     distinct()
@@ -1464,14 +1484,19 @@ ggsave(here::here("outputs", "figures", "ufh_mse_y1.png"),
 mse_decomp_y1 <- build_mse_decomposition(res_y1)
 
 # UFH Lambda summary by region
-lambda_by_region_y1 <- mse_decomp_y1 %>%
-  group_by(region) %>%
-  summarize(lambda_r = first(lambda_r), .groups = "drop") %>%
-  mutate(abs_shift = round(abs(lambda_r - 1), 6),
-         lambda_r  = round(lambda_r, 6))
-cat("\nUFH Lambda factors by region (Year", years_keep[1], "):\n")
-print(as.data.frame(lambda_by_region_y1))
-cat("Mean |lambda - 1|:", round(mean(lambda_by_region_y1$abs_shift), 6), "\n")
+if (isTRUE(do_benchmark)) {
+  lambda_by_region_y1 <- mse_decomp_y1 %>%
+    group_by(region) %>%
+    summarize(lambda_r = first(lambda_r), .groups = "drop") %>%
+    mutate(abs_shift = round(abs(lambda_r - 1), 6),
+           lambda_r  = round(lambda_r, 6))
+  cat("\nUFH Lambda factors by region (Year", years_keep[1], "):\n")
+  print(as.data.frame(lambda_by_region_y1))
+  cat("Mean |lambda - 1|:", round(mean(lambda_by_region_y1$abs_shift), 6), "\n")
+} else {
+  cat("\nUFH benchmarking not applied; lambda factor summary skipped for Year",
+      years_keep[1], ".\n")
+}
 
 cat("Year", years_keep[1], "- Domains with FH_Bench_MSE > Direct_MSE:",
     sum(mse_decomp_y1$Bench_gt_Direct, na.rm = TRUE), "\n")
@@ -1508,12 +1533,17 @@ if (.use_eur_plots) {
   ggsave(here::here("outputs", "figures", "ufh_map_y1.png"),
          .p_map_y1, width = 10, height = 8, dpi = 150)
 } else {
-  domain_ord <- match(shp_dt[["domain"]], res_y1$fh_bench$ind$Domain)
-  map_tab <- data.frame(pop_data_id = res_y1$fh_bench$ind$Domain[domain_ord],
+  .map_model_y1 <- if (isTRUE(do_benchmark) && !is.null(res_y1$fh_bench)) {
+    res_y1$fh_bench
+  } else {
+    res_y1$fh_model
+  }
+  domain_ord <- match(shp_dt[["domain"]], .map_model_y1$ind$Domain)
+  map_tab <- data.frame(pop_data_id = .map_model_y1$ind$Domain[domain_ord],
                         shape_id = shp_dt[["domain"]])
   png(here::here("outputs", "figures", "ufh_map_y1.png"),
       width = 10, height = 8, units = "in", res = 150)
-  map_plot(object = res_y1$fh_bench, MSE = TRUE, map_obj = shp_dt,
+  map_plot(object = .map_model_y1, MSE = TRUE, map_obj = shp_dt,
            map_dom_id = "domain", map_tab = map_tab)
   dev.off()
 }
@@ -1722,14 +1752,19 @@ ggsave(here::here("outputs", "figures", "ufh_mse_y2.png"),
 mse_decomp_y2 <- build_mse_decomposition(res_y2)
 
 # UFH Lambda summary by region
-lambda_by_region_y2 <- mse_decomp_y2 %>%
-  group_by(region) %>%
-  summarize(lambda_r = first(lambda_r), .groups = "drop") %>%
-  mutate(abs_shift = round(abs(lambda_r - 1), 6),
-         lambda_r  = round(lambda_r, 6))
-cat("\nUFH Lambda factors by region (Year", years_keep[2], "):\n")
-print(as.data.frame(lambda_by_region_y2))
-cat("Mean |lambda - 1|:", round(mean(lambda_by_region_y2$abs_shift), 6), "\n")
+if (isTRUE(do_benchmark)) {
+  lambda_by_region_y2 <- mse_decomp_y2 %>%
+    group_by(region) %>%
+    summarize(lambda_r = first(lambda_r), .groups = "drop") %>%
+    mutate(abs_shift = round(abs(lambda_r - 1), 6),
+           lambda_r  = round(lambda_r, 6))
+  cat("\nUFH Lambda factors by region (Year", years_keep[2], "):\n")
+  print(as.data.frame(lambda_by_region_y2))
+  cat("Mean |lambda - 1|:", round(mean(lambda_by_region_y2$abs_shift), 6), "\n")
+} else {
+  cat("\nUFH benchmarking not applied; lambda factor summary skipped for Year",
+      years_keep[2], ".\n")
+}
 
 cat("Year", years_keep[2], "- Domains with FH_Bench_MSE > Direct_MSE:",
     sum(mse_decomp_y2$Bench_gt_Direct, na.rm = TRUE), "\n")
@@ -1766,12 +1801,17 @@ if (.use_eur_plots) {
   ggsave(here::here("outputs", "figures", "ufh_map_y2.png"),
          .p_map_y2, width = 10, height = 8, dpi = 150)
 } else {
-  domain_ord <- match(shp_dt[["domain"]], res_y2$fh_bench$ind$Domain)
-  map_tab <- data.frame(pop_data_id = res_y2$fh_bench$ind$Domain[domain_ord],
+  .map_model_y2 <- if (isTRUE(do_benchmark) && !is.null(res_y2$fh_bench)) {
+    res_y2$fh_bench
+  } else {
+    res_y2$fh_model
+  }
+  domain_ord <- match(shp_dt[["domain"]], .map_model_y2$ind$Domain)
+  map_tab <- data.frame(pop_data_id = .map_model_y2$ind$Domain[domain_ord],
                         shape_id = shp_dt[["domain"]])
   png(here::here("outputs", "figures", "ufh_map_y2.png"),
       width = 10, height = 8, units = "in", res = 150)
-  map_plot(object = res_y2$fh_bench, MSE = TRUE, map_obj = shp_dt,
+  map_plot(object = .map_model_y2, MSE = TRUE, map_obj = shp_dt,
            map_dom_id = "domain", map_tab = map_tab)
   dev.off()
 }

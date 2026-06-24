@@ -934,7 +934,11 @@ ui <- fluidPage(
         condition = "input.do_benchmark",
         fileInput("regional_benchmark_file",
           tip_label("Benchmark Target Database (optional)",
-                    "Optional RDS/CSV/XLSX file with benchmark targets by year. Leave blank to estimate targets from the survey using population_weight = weight * household size."))
+                    "Optional RDS/CSV/XLSX file with benchmark targets by year. Leave blank to estimate targets from the survey using population_weight = weight * household size.")),
+        textInput("var_benchmark_level",
+          tip_label("Benchmark level",
+                    "Optional survey column for grouped benchmarking, such as region, NUTS2, or voivodeship. Leave blank for national benchmarking."),
+          "")
       ),
       fileInput("population_file",
         tip_label("Domain population sizes (optional)",
@@ -961,9 +965,6 @@ ui <- fluidPage(
       textInput("var_hh_size",
         tip_label("household size", "Column name for household size. Direct poverty-rate estimates use population_weight = weight * household size; when no population file is uploaded, benchmarking also estimates domain populations as sum(weight * household size) by domain and year."),
         "hhsize"),
-      textInput("var_benchmark_level",
-        tip_label("benchmark level", "Optional survey column for grouped benchmarking, such as region, NUTS2, or voivodeship. Leave blank for national benchmarking."),
-        ""),
       textInput("var_welfare",
         tip_label("welfare", "Column name for the welfare variable (e.g. income or consumption) used to determine poverty status."),
         "income"),
@@ -1299,6 +1300,7 @@ server <- function(input, output, session) {
 
   # ---- Benchmarking level helpers ----
   get_benchmark_level_var <- reactive({
+    if (!isTRUE(input$do_benchmark)) return("")
     trimws(input$var_benchmark_level %||% "")
   })
 
