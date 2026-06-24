@@ -178,10 +178,47 @@ if (nzchar(cfg_path) && file.exists(cfg_path)) {
   if (!is.null(cfg$mfh)) mfh_cfg <- cfg$mfh
 }
 
+if (!exists("%||%", mode = "function")) {
+  `%||%` <- function(x, y) {
+    if (is.null(x) || length(x) == 0) y else x
+  }
+}
+
 cfg_or_default <- function(x, default) {
   if (is.null(x) || length(x) == 0 ||
       (length(x) == 1 && is.na(x)) ||
       (is.character(x) && !isTRUE(nzchar(x)))) default else x
+}
+
+existing_default_path <- function(...) {
+  candidates <- c(...)
+  existing <- candidates[file.exists(candidates)]
+  path <- if (length(existing) > 0) existing[[1]] else candidates[[1]]
+  normalizePath(path, winslash = "/", mustWork = FALSE)
+}
+
+resolve_config_path <- function(path, default_path, label, legacy_default = NULL) {
+  path <- cfg_or_default(path, default_path)
+  if (file.exists(path)) return(normalizePath(path, winslash = "/", mustWork = TRUE))
+
+  normalized_path <- normalizePath(path, winslash = "/", mustWork = FALSE)
+  legacy_defaults <- legacy_default %||% character()
+  normalized_legacy <- normalizePath(legacy_defaults, winslash = "/", mustWork = FALSE)
+  normalized_default <- normalizePath(default_path, winslash = "/", mustWork = FALSE)
+  if (length(normalized_legacy) > 0 &&
+      normalized_path %in% normalized_legacy &&
+      file.exists(default_path)) {
+    message(sprintf(
+      "Configured %s file %s was not found; using packaged sample file %s.",
+      label, normalized_path, normalized_default
+    ))
+    return(normalized_default)
+  }
+
+  stop(sprintf(
+    "%s file does not exist: %s\nUpload the file again or update app_config.yml to a stable path.",
+    label, normalized_path
+  ), call. = FALSE)
 }
 
 # ---- Indicator: poverty (FGT) or mean welfare ----------------------------
@@ -224,9 +261,36 @@ if (identical(indicator_type, "poverty")) {
   cat("Indicator: Mean welfare", if (log_transform) "(log-fit, back-transformed)" else "(identity scale)", "\n")
 }
 
-survey_path <- cfg_or_default(mfh_cfg$survey_path, here::here("data", "pov_direct3.rds"))
-rhs_path    <- cfg_or_default(mfh_cfg$rhs_path, here::here("data", "sae_data.rds"))
-shp_path    <- cfg_or_default(mfh_cfg$shp_path, here::here("data", "geometries.rds"))
+.default_survey_path <- existing_default_path(
+  here::here("data", "pov_directv4.rds"),
+  here::here("data", "pov_direct3.rds"),
+  here::here("sample_data", "pov_directv4.rds"),
+  here::here("sample_data", "pov_direct3.rds")
+)
+.default_rhs_path <- existing_default_path(
+  here::here("data", "sae_data.rds"),
+  here::here("sample_data", "sae_data.rds")
+)
+.default_shp_path <- existing_default_path(
+  here::here("data", "geometries.rds"),
+  here::here("sample_data", "geometries.rds")
+)
+survey_path <- resolve_config_path(
+  mfh_cfg$survey_path, .default_survey_path, "Survey",
+  legacy_default = c(here::here("data", "pov_direct3.rds"),
+                     here::here("sample_data", "pov_directv4.rds"),
+                     here::here("sample_data", "pov_direct3.rds"))
+)
+rhs_path <- resolve_config_path(
+  mfh_cfg$rhs_path, .default_rhs_path, "Auxiliary covariates",
+  legacy_default = c(here::here("data", "sae_data.rds"),
+                     here::here("sample_data", "sae_data.rds"))
+)
+shp_path <- resolve_config_path(
+  mfh_cfg$shp_path, .default_shp_path, "Geometry",
+  legacy_default = c(here::here("data", "geometries.rds"),
+                     here::here("sample_data", "geometries.rds"))
+)
 
 survey_raw <- readRDS(survey_path)   # household-level survey data
 rhs_dt     <- readRDS(rhs_path)      # domain-level covariates

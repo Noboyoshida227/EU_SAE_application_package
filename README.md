@@ -28,6 +28,18 @@ If that port is already in use, the launcher prints and opens the next available
 
 Keep the terminal or launcher window open while using the dashboard.
 
+## Data Files
+
+Before running the app, place all three required `.rds` datasets in the package
+`data/` subfolder:
+
+- household survey data
+- auxiliary covariates
+- shapefiles/geometries as an `sf` object
+
+File names can be anything. In the dashboard, choose the three files from the
+Data inputs dropdowns, or use the upload buttons to select files directly.
+
 ## Included Runtime Files
 
 - `app.R`, `app_support.R`, `install_packages.R`, and `report.Rmd`

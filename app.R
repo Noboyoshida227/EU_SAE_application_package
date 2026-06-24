@@ -90,13 +90,16 @@ if (length(.missing_pkgs) > 0) {
   ), immediate. = TRUE)
 }
 
-# Check that data files exist
-.required_data <- c("data/pov_direct3.rds", "data/sae_data.rds", "data/geometries.rds")
-.missing_data <- .required_data[!file.exists(.required_data)]
-if (length(.missing_data) > 0) {
+data_dir_path <- function() {
+  normalizePath("data", winslash = "/", mustWork = FALSE)
+}
+
+# Check that the package data folder exists. Individual filenames are chosen
+# by the user in the dashboard and can vary across countries.
+if (!dir.exists(data_dir_path())) {
   warning(sprintf(
-    "Default data files not found: %s\nThe app will still work if you upload your own data files.",
-    paste(.missing_data, collapse = ", ")
+    "Data folder not found: %s\nCreate this subfolder and place the survey, auxiliary covariates, and shapefiles/geometries .rds files there before choosing them in the dashboard.",
+    data_dir_path()
   ), immediate. = TRUE)
 }
 
@@ -119,6 +122,22 @@ resolve_upload <- function(file_input, fallback = NULL) {
     return(fallback)
   }
   normalizePath(file_input$datapath, winslash = "/", mustWork = TRUE)
+}
+
+resolve_data_input <- function(file_input, fallback = NULL) {
+  resolve_upload(file_input, fallback)
+}
+
+display_data_path <- function(path) {
+  path <- path %||% ""
+  if (nzchar(path)) path else "(not selected)"
+}
+
+missing_data_inputs <- function(survey_path, rhs_path, shp_path) {
+  paths <- c(Survey = survey_path %||% "",
+             Auxiliary = rhs_path %||% "",
+             Geometry = shp_path %||% "")
+  names(paths)[!nzchar(paths) | !file.exists(paths)]
 }
 
 validate_mapped_input_columns <- function(survey_raw, rhs_raw, var_map, rhs_domain,
@@ -896,14 +915,18 @@ ui <- fluidPage(
       ),
       tags$hr(),
 
-      # ---- Data uploads ----
-      h4("Data (optional uploads)"),
+      # ---- Data inputs ----
+      h4("Data inputs"),
+      tags$div(
+        style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
+        "Before running the app, users must place all three required .rds datasets in the package data/ subfolder: household survey, auxiliary covariates, and shapefiles/geometries. File names can be anything; use the three file boxes below to choose those files."
+      ),
       fileInput("survey_file",
-        tip_label("Survey data (.rds)", "Household-level records with columns for year, domain, PSU, weight, welfare variable, poverty line, and poverty indicator. Leave blank to use the default Greek province data.")),
+        tip_label("Survey data (.rds)", "Household-level records with columns for year, domain, PSU, weight, welfare variable, poverty line, and poverty indicator. Choose the file from the package data/ subfolder.")),
       fileInput("rhs_file",
-        tip_label("Auxiliary covariates (.rds)", "Domain-level covariates used as regressors in the Fay-Herriot models. Leave blank to use the default data.")),
+        tip_label("Auxiliary covariates (.rds)", "Domain-level covariates used as regressors in the Fay-Herriot models. Choose the file from the package data/ subfolder.")),
       fileInput("shp_file",
-        tip_label("Shapefiles (.rds)", "An sf object with domain polygons for poverty mapping. Leave blank to use the default Greek geometries.")),
+        tip_label("Shapefiles (.rds)", "An sf object with domain polygons for poverty mapping. Choose the file from the package data/ subfolder.")),
       checkboxInput("do_benchmark",
         tip_label("Apply benchmarking", "If checked, UFH and MFH estimates are benchmarked. If unchecked, uploaded benchmark files and benchmark-level mappings are ignored for the next run."),
         value = FALSE),
@@ -1424,9 +1447,9 @@ server <- function(input, output, session) {
     }
 
     has_file <- function(path) nzchar(path %||% "") && file.exists(path)
-    survey_path <- resolve_upload(input$survey_file, "data/pov_direct3.rds")
-    rhs_path <- resolve_upload(input$rhs_file, "data/sae_data.rds")
-    shp_path <- resolve_upload(input$shp_file, "data/geometries.rds")
+    survey_path <- resolve_data_input(input$survey_file, fallback = NULL)
+    rhs_path <- resolve_data_input(input$rhs_file, fallback = NULL)
+    shp_path <- resolve_data_input(input$shp_file, fallback = NULL)
 
     root_ok <- all(file.exists(c("app_support.R", "scripts/01_ufh.R", "scripts/02_mfh.R", "scripts/03_comparison.R")))
     years_vec <- parse_years(input$years)
@@ -1504,17 +1527,17 @@ server <- function(input, output, session) {
       actions <- c(actions, "- Set `Analysis years` to exactly two comma-separated years.")
     }
 
-    survey_path <- resolve_upload(input$survey_file, "data/pov_direct3.rds")
-    rhs_path <- resolve_upload(input$rhs_file, "data/sae_data.rds")
-    shp_path <- resolve_upload(input$shp_file, "data/geometries.rds")
+    survey_path <- resolve_data_input(input$survey_file, fallback = NULL)
+    rhs_path <- resolve_data_input(input$rhs_file, fallback = NULL)
+    shp_path <- resolve_data_input(input$shp_file, fallback = NULL)
     if (!file.exists(survey_path %||% "")) {
-      actions <- c(actions, "- Upload a valid survey `.rds` file or keep the default sample survey data in `data/`.")
+      actions <- c(actions, sprintf("- Put the household survey `.rds` file in the package `data/` subfolder, then choose it in the Survey data file box. Resolved path: `%s`.", display_data_path(survey_path)))
     }
     if (!file.exists(rhs_path %||% "")) {
-      actions <- c(actions, "- Upload a valid auxiliary covariates `.rds` file or keep the default auxiliary data in `data/`.")
+      actions <- c(actions, sprintf("- Put the auxiliary covariates `.rds` file in the package `data/` subfolder, then choose it in the Auxiliary covariates file box. Resolved path: `%s`.", display_data_path(rhs_path)))
     }
     if (!file.exists(shp_path %||% "")) {
-      actions <- c(actions, "- Upload a valid geometry `.rds` file or keep the default geometry data in `data/`.")
+      actions <- c(actions, sprintf("- Put the shapefiles/geometries `.rds` file in the package `data/` subfolder, then choose it in the Shapefiles file box. Resolved path: `%s`.", display_data_path(shp_path)))
     }
 
     if (!requireNamespace("sf", quietly = TRUE)) {
@@ -1740,9 +1763,23 @@ server <- function(input, output, session) {
     logs("")
     append_log("Running preflight and data readiness checks...")
 
-    survey_path <- resolve_upload(input$survey_file)
-    rhs_path    <- resolve_upload(input$rhs_file)
-    shp_path    <- resolve_upload(input$shp_file)
+    survey_path <- resolve_data_input(input$survey_file)
+    rhs_path    <- resolve_data_input(input$rhs_file)
+    shp_path    <- resolve_data_input(input$shp_file)
+    append_log(paste("Survey data path:", display_data_path(survey_path)))
+    append_log(paste("Auxiliary data path:", display_data_path(rhs_path)))
+    append_log(paste("Geometry data path:", display_data_path(shp_path)))
+    missing_inputs <- missing_data_inputs(survey_path, rhs_path, shp_path)
+    if (length(missing_inputs) > 0) {
+      msg <- paste0(
+        "Missing data input(s): ", paste(missing_inputs, collapse = ", "),
+        ". Choose the files from the data/ folder before checking readiness."
+      )
+      status("Data readiness check failed")
+      append_log(paste("ERROR:", msg))
+      showNotification(msg, type = "error", duration = 10)
+      return()
+    }
     regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
       resolve_upload(input$regional_benchmark_file)
     } else {
@@ -1755,8 +1792,8 @@ server <- function(input, output, session) {
     }
     var_map     <- get_var_map()
 
-    survey_for_validation <- survey_path %||% "data/pov_direct3.rds"
-    rhs_for_validation    <- rhs_path    %||% "data/sae_data.rds"
+    survey_for_validation <- survey_path
+    rhs_for_validation    <- rhs_path
 
     harmonized <- tryCatch(
       load_and_harmonize(survey_for_validation, rhs_for_validation,
@@ -1869,7 +1906,7 @@ server <- function(input, output, session) {
     }
 
     geo_raw <- tryCatch(
-      readRDS(shp_path %||% "data/geometries.rds"),
+      readRDS(shp_path),
       error = function(e) NULL
     )
     rr <- assess_data_readiness(
@@ -1994,9 +2031,23 @@ server <- function(input, output, session) {
     append_log(paste("Run folder:", run_dir_abs))
     append_log(paste("Archived outputs will be saved to:", run_outputs_abs))
 
-    survey_path <- resolve_upload(input$survey_file)
-    rhs_path    <- resolve_upload(input$rhs_file)
-    shp_path    <- resolve_upload(input$shp_file)
+    survey_path <- resolve_data_input(input$survey_file)
+    rhs_path    <- resolve_data_input(input$rhs_file)
+    shp_path    <- resolve_data_input(input$shp_file)
+    append_log(paste("Survey data path:", display_data_path(survey_path)))
+    append_log(paste("Auxiliary data path:", display_data_path(rhs_path)))
+    append_log(paste("Geometry data path:", display_data_path(shp_path)))
+    missing_inputs <- missing_data_inputs(survey_path, rhs_path, shp_path)
+    if (length(missing_inputs) > 0) {
+      msg <- paste0(
+        "Missing data input(s): ", paste(missing_inputs, collapse = ", "),
+        ". Choose the files from the data/ folder before running analysis."
+      )
+      status("Missing data inputs")
+      append_log(paste("ERROR:", msg))
+      showNotification(msg, type = "error", duration = 10)
+      return()
+    }
     regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
       resolve_upload(input$regional_benchmark_file)
     } else {
@@ -2040,8 +2091,8 @@ server <- function(input, output, session) {
     advance_progress("Validation", "Checking input data")
     status("Validating input data...")
     append_log("Validating input data...")
-    survey_for_validation <- survey_path %||% "data/pov_direct3.rds"
-    rhs_for_validation    <- rhs_path    %||% "data/sae_data.rds"
+    survey_for_validation <- survey_path
+    rhs_for_validation    <- rhs_path
 
     harmonized <- tryCatch(
       load_and_harmonize(survey_for_validation, rhs_for_validation,
@@ -2149,7 +2200,7 @@ server <- function(input, output, session) {
       }
 
       geo_raw <- tryCatch(
-        readRDS(shp_path %||% "data/geometries.rds"),
+        readRDS(shp_path),
         error = function(e) NULL
       )
       rr <- assess_data_readiness(
@@ -2341,9 +2392,9 @@ server <- function(input, output, session) {
     }
 
     ufh_cfg <- list(
-      survey_path             = survey_path %||% "data/pov_direct3.rds",
-      rhs_path                = rhs_path    %||% "data/sae_data.rds",
-      shp_path                = shp_path    %||% "data/geometries.rds",
+      survey_path             = survey_path,
+      rhs_path                = rhs_path,
+      shp_path                = shp_path,
       population_path         = population_path,
       do_benchmark            = isTRUE(input$do_benchmark),
       benchmark_level         = benchmark_level,
@@ -2393,9 +2444,9 @@ server <- function(input, output, session) {
     }
 
     mfh_cfg <- list(
-      survey_path             = survey_path %||% "data/pov_direct3.rds",
-      rhs_path                = rhs_path    %||% "data/sae_data.rds",
-      shp_path                = shp_path    %||% "data/geometries.rds",
+      survey_path             = survey_path,
+      rhs_path                = rhs_path,
+      shp_path                = shp_path,
       regional_benchmark_path = regional_benchmark_path,
       benchmark_target_path   = regional_benchmark_path,
       population_path         = population_path,
@@ -2456,6 +2507,15 @@ server <- function(input, output, session) {
         level_label = benchmark_level_label,
         source = benchmark_source_label,
         target_path = regional_benchmark_path
+      ),
+      data_inputs     = list(
+        data_folder = data_dir_path(),
+        survey_file = input$survey_file$name %||% "",
+        rhs_file = input$rhs_file$name %||% "",
+        shp_file = input$shp_file$name %||% "",
+        survey_path = survey_path,
+        rhs_path = rhs_path,
+        shp_path = shp_path
       ),
       run             = list(steps = input$steps),
       ufh             = ufh_cfg,

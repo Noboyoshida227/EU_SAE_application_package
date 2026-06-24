@@ -29,6 +29,12 @@ if (file.exists(here::here("R", "indicator_helpers.R"))) {
   source(here::here("R", "indicator_helpers.R"))
 }
 
+if (!exists("%||%", mode = "function")) {
+  `%||%` <- function(x, y) {
+    if (is.null(x) || length(x) == 0) y else x
+  }
+}
+
 .cmp_cfg_path <- Sys.getenv("SAE_APP_CONFIG", unset = "")
 .cmp_cfg <- if (nzchar(.cmp_cfg_path) && file.exists(.cmp_cfg_path)) {
   yaml::read_yaml(.cmp_cfg_path)
@@ -181,12 +187,27 @@ diag_model <- if (!is.null(mfh_artifacts$diag_model)) mfh_artifacts$diag_model e
 if (nzchar(.configured_shp_path)) {
   .shp_path <- .configured_shp_path
   if (!file.exists(.shp_path)) {
-    stop(
-      "Comparison step could not open the configured geometry file: ",
-      .shp_path,
-      "\nThis is usually a temporary uploaded file that is no longer available. ",
-      "Please rerun the app with the geometry file uploaded, or provide a stable geometry RDS path."
+    .legacy_shp_paths <- normalizePath(
+      c(here::here("data", "geometries.rds"),
+        here::here("sample_data", "geometries.rds")),
+      winslash = "/", mustWork = FALSE
     )
+    .configured_shp_norm <- normalizePath(.configured_shp_path, winslash = "/", mustWork = FALSE)
+    .default_shp_path <- normalizePath(here::here("data", "geometries.rds"), winslash = "/", mustWork = FALSE)
+    if (.configured_shp_norm %in% .legacy_shp_paths && file.exists(.default_shp_path)) {
+      .diag_push(paste0(
+        "Configured geometry file was not found: ", .configured_shp_norm,
+        " -- using packaged data geometry: ", .default_shp_path
+      ))
+      .shp_path <- .default_shp_path
+    } else {
+      stop(
+        "Comparison step could not open the configured geometry file: ",
+        .configured_shp_path,
+        "\nThis is usually a temporary uploaded file that is no longer available. ",
+        "Please rerun the app with the geometry file uploaded, or provide a stable geometry RDS path."
+      )
+    }
   }
 } else {
   .shp_path <- .cmp_first_existing(
@@ -194,7 +215,7 @@ if (nzchar(.configured_shp_path)) {
     here::here("sample_data", "geometries.rds")
   )
   if (!nzchar(.shp_path)) {
-    stop("Comparison step could not find a geometry RDS file. Checked data/geometries.rds and sample_data/geometries.rds.")
+    stop("Comparison step could not find a geometry RDS file. Checked data/geometries.rds.")
   }
 }
 
