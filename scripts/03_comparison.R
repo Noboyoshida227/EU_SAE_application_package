@@ -24,7 +24,10 @@ suppressPackageStartupMessages({
   library(here)
 })
 
+options(survey.lonely.psu = "adjust")
+
 source(here::here("scripts", "ufh_functions.R"))
+source(here::here("R", "input_readers.R"))
 if (file.exists(here::here("R", "indicator_helpers.R"))) {
   source(here::here("R", "indicator_helpers.R"))
 }
@@ -286,7 +289,7 @@ if (nzchar(.configured_shp_path)) {
 .diag_push(paste0("Geometry path: ", .shp_path))
 .diag_push(paste0("Geometry domain column requested: ", .shp_domain_col))
 
-shp_raw <- readRDS(.shp_path)
+shp_raw <- sae_read_geometry_input(.shp_path, "Geometry data")
 if (!.shp_domain_col %in% names(shp_raw)) {
   .domain_candidates <- c("domain", "Domain", "prov", "province", "NUTS_ID",
                           "nuts_id", "NUTS3", "nuts3", "id", "ID")
@@ -376,8 +379,20 @@ tryCatch(
 sig_fh <- read.csv(here::here("outputs", "tables", "statistical_significance_results_unbench.csv")) %>%
   mutate(domain = .cmp_clean_domain(domain))
 
-sig_fh_bench <- read.csv(here::here("outputs", "tables", "statistical_significance_results.csv")) %>%
-  mutate(domain = .cmp_clean_domain(domain))
+.sig_fh_bench_path <- here::here("outputs", "tables", "statistical_significance_results.csv")
+sig_fh_bench <- if (.benchmark_enabled && file.exists(.sig_fh_bench_path)) {
+  read.csv(.sig_fh_bench_path) %>%
+    mutate(domain = .cmp_clean_domain(domain))
+} else {
+  data.frame(
+    domain      = integer(0),
+    diff        = numeric(0),
+    mse         = numeric(0),
+    lb          = numeric(0),
+    ub          = numeric(0),
+    significant = logical(0)
+  )
+}
 
 # Read the MFH change-analysis CSVs defensively. The MFH stage cleans
 # these files at startup and only rewrites them when the corresponding
@@ -497,7 +512,13 @@ dir.create(here::here("outputs", "data"), recursive = TRUE, showWarnings = FALSE
   }
   writexl::write_xlsx(df, path = path)
 }
-.write_xlsx_safe(comparison_dt, here::here("outputs", "data", "pov_comparison_detailed.xlsx"))
+.comparison_export <- comparison_dt
+if (!.benchmark_enabled) {
+  .comparison_export_cols <- grep("(^|_)Bench($|_)", names(.comparison_export), value = TRUE)
+  .comparison_export <- .comparison_export %>%
+    select(-any_of(.comparison_export_cols))
+}
+.write_xlsx_safe(.comparison_export, here::here("outputs", "data", "pov_comparison_detailed.xlsx"))
 
 
 deparse_formula <- function(x) paste(deparse(x), collapse = "")

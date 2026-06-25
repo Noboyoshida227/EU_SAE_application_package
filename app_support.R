@@ -2,6 +2,13 @@
   if (is.null(x) || length(x) == 0) y else x
 }
 
+if (!exists("sae_read_table_input", mode = "function")) {
+  .input_reader_path <- file.path("R", "input_readers.R")
+  if (file.exists(.input_reader_path)) {
+    source(.input_reader_path)
+  }
+}
+
 parse_years <- function(x) {
   if (is.numeric(x)) return(sort(as.integer(x)))
   raw <- trimws(unlist(strsplit(as.character(x %||% ""), ",")))
@@ -263,8 +270,8 @@ validate_mapped_input_columns <- function(survey_raw, rhs_raw, var_map, rhs_doma
 load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
                                povline_type = "column", povline_value = NULL,
                                indicator_type = "poverty") {
-  survey_raw <- tryCatch(readRDS(survey_path), error = function(e) NULL)
-  rhs_raw    <- tryCatch(readRDS(rhs_path),    error = function(e) NULL)
+  survey_raw <- tryCatch(sae_read_table_input(survey_path, "Survey data"), error = function(e) NULL)
+  rhs_raw    <- tryCatch(sae_read_table_input(rhs_path, "Auxiliary covariates"), error = function(e) NULL)
 
   if (is.null(survey_raw) || is.null(rhs_raw)) return(NULL)
 
@@ -278,12 +285,16 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   )
 
   # Build rename vector from var_map
+  use_strata <- isTRUE({
+    strata_var <- trimws(as.character(var_map$strata %||% ""))
+    length(strata_var) == 1 && !is.na(strata_var) && nzchar(strata_var)
+  })
   rename_vec <- c()
   if (var_map$domain  != "domain")  rename_vec <- c(rename_vec, domain  = var_map$domain)
   if (var_map$psu     != "psu")     rename_vec <- c(rename_vec, psu     = var_map$psu)
   if (var_map$welfare != "welfare") rename_vec <- c(rename_vec, welfare = var_map$welfare)
   if (var_map$weight  != "weight")  rename_vec <- c(rename_vec, weight  = var_map$weight)
-  if (!is.null(var_map$strata) && nzchar(var_map$strata) &&
+  if (use_strata && !is.null(var_map$strata) && nzchar(var_map$strata) &&
       var_map$strata != "strata") {
     rename_vec <- c(rename_vec, strata = var_map$strata)
   }
@@ -312,6 +323,9 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
     if (old_name %in% names(survey_data)) {
       names(survey_data)[names(survey_data) == old_name] <- new_name
     }
+  }
+  if (!use_strata && "strata" %in% names(survey_data)) {
+    survey_data$strata <- NULL
   }
   if (nzchar(benchmark_level_var) &&
       !"region" %in% names(survey_data) &&
@@ -494,6 +508,9 @@ enrich_diagnostics_from_output <- function(output_df, yr, model_type = "UFH") {
   est_col <- grep("FH_Bench$|MFH_Bench$", names(yr_data), value = TRUE)
   cv_col  <- grep("FH_Bench_CV$|MFH_Bench_CV$", names(yr_data), value = TRUE)
   mse_col <- grep("FH_Bench_MSE$|MFH_Bench_MSE$", names(yr_data), value = TRUE)
+  if (length(est_col) == 0 && length(cv_col) == 0 && length(mse_col) == 0) {
+    return(NULL)
+  }
 
   bench <- list(n_domains = nrow(yr_data))
 

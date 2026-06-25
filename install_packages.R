@@ -46,7 +46,7 @@ cran_packages <- c(
 
   # Data manipulation
   "data.table", "dplyr", "tidyr", "purrr", "stringr",
-  "tibble", "rlang", "tidyverse", "reshape2",
+  "tibble", "rlang", "tidyverse", "reshape2", "haven",
 
   # Small area estimation
   "sae", "msae", "emdi",

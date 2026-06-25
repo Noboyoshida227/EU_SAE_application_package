@@ -57,6 +57,7 @@ if (!identical(normalizePath(getwd(), winslash = "/", mustWork = TRUE), .app_dir
 
 # Check that all required source files exist before loading
 .required_source_files <- c(
+  "R/input_readers.R",
   "app_support.R",
   "R/validation_checks.R",
   "R/multilingual.R",
@@ -80,6 +81,7 @@ if (length(.missing_files) > 0) {
   yaml       = "install.packages('yaml')",
   dplyr      = "install.packages('dplyr')",
   readxl     = "install.packages('readxl')",
+  haven      = "install.packages('haven')      # needed for Stata .dta inputs",
   rmarkdown  = "install.packages('rmarkdown') # needed for report rendering",
   httr       = "install.packages('httr')      # needed for AI Assistant",
   jsonlite   = "install.packages('jsonlite') # needed for AI Assistant",
@@ -112,6 +114,7 @@ if (!dir.exists(data_dir_path())) {
   ), immediate. = TRUE)
 }
 
+source("R/input_readers.R")
 source("app_support.R")
 source("R/validation_checks.R")
 source("R/multilingual.R")
@@ -140,6 +143,15 @@ resolve_data_input <- function(file_input, fallback = NULL) {
 display_data_path <- function(path) {
   path <- path %||% ""
   if (nzchar(path)) path else "(not selected)"
+}
+
+filter_to_analysis_years <- function(df, years) {
+  if (is.null(df) || !"year" %in% names(df) || length(years) == 0) {
+    return(df)
+  }
+  year_values <- suppressWarnings(as.integer(as.character(df$year)))
+  keep <- year_values %in% as.integer(years)
+  df[keep %in% TRUE, , drop = FALSE]
 }
 
 missing_data_inputs <- function(survey_path, rhs_path, shp_path) {
@@ -294,8 +306,8 @@ validate_mapped_input_columns <- function(survey_raw, rhs_raw, var_map, rhs_doma
 load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
                                povline_type = "column", povline_value = NULL,
                                indicator_type = "poverty") {
-  survey_raw <- tryCatch(readRDS(survey_path), error = function(e) NULL)
-  rhs_raw    <- tryCatch(readRDS(rhs_path),    error = function(e) NULL)
+  survey_raw <- tryCatch(sae_read_table_input(survey_path, "Survey data"), error = function(e) NULL)
+  rhs_raw    <- tryCatch(sae_read_table_input(rhs_path, "Auxiliary covariates"), error = function(e) NULL)
 
   if (is.null(survey_raw) || is.null(rhs_raw)) return(NULL)
 
@@ -309,12 +321,16 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
   )
 
   # Build rename vector from var_map
+  use_strata <- isTRUE({
+    strata_var <- trimws(as.character(var_map$strata %||% ""))
+    length(strata_var) == 1 && !is.na(strata_var) && nzchar(strata_var)
+  })
   rename_vec <- c()
   if (var_map$domain  != "domain")  rename_vec <- c(rename_vec, domain  = var_map$domain)
   if (var_map$psu     != "psu")     rename_vec <- c(rename_vec, psu     = var_map$psu)
   if (var_map$welfare != "welfare") rename_vec <- c(rename_vec, welfare = var_map$welfare)
   if (var_map$weight  != "weight")  rename_vec <- c(rename_vec, weight  = var_map$weight)
-  if (!is.null(var_map$strata) && nzchar(var_map$strata) &&
+  if (use_strata && !is.null(var_map$strata) && nzchar(var_map$strata) &&
       var_map$strata != "strata") {
     rename_vec <- c(rename_vec, strata = var_map$strata)
   }
@@ -343,6 +359,9 @@ load_and_harmonize <- function(survey_path, rhs_path, var_map, rhs_domain,
     if (old_name %in% names(survey_data)) {
       names(survey_data)[names(survey_data) == old_name] <- new_name
     }
+  }
+  if (!use_strata && "strata" %in% names(survey_data)) {
+    survey_data$strata <- NULL
   }
   if (nzchar(benchmark_level_var) &&
       !"region" %in% names(survey_data) &&
@@ -524,6 +543,9 @@ enrich_diagnostics_from_output <- function(output_df, yr, model_type = "UFH") {
   est_col <- grep("FH_Bench$|MFH_Bench$", names(yr_data), value = TRUE)
   cv_col  <- grep("FH_Bench_CV$|MFH_Bench_CV$", names(yr_data), value = TRUE)
   mse_col <- grep("FH_Bench_MSE$|MFH_Bench_MSE$", names(yr_data), value = TRUE)
+  if (length(est_col) == 0 && length(cv_col) == 0 && length(mse_col) == 0) {
+    return(NULL)
+  }
 
   bench <- list(n_domains = nrow(yr_data))
 
@@ -603,6 +625,16 @@ ui <- fluidPage(
           group.removeClass('mapping-invalid');
           group.removeAttr('title');
         }
+      });
+      Shiny.addCustomMessageHandler('clearFileInput', function(id) {
+        var input = document.getElementById(id);
+        if (input) {
+          input.value = '';
+          $(input).trigger('change');
+        }
+        var group = $('#' + id).closest('.form-group');
+        group.find('.file-caption-name').attr('title', '').text('No file selected');
+        group.find('input[type=text]').val('');
       });
     ")),
     tags$style(HTML("
@@ -750,6 +782,31 @@ ui <- fluidPage(
       padding: 8px 10px;
       font-size: 12px;
       margin: 4px 0 12px 0;
+    }
+    .benchmark-format-note {
+      color: #445;
+      background: #f7f9fc;
+      border: 1px solid #d9e2ef;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+      margin: -4px 0 12px 0;
+    }
+    .benchmark-format-note .note-title {
+      font-weight: 600;
+      color: #24324a;
+      margin-bottom: 4px;
+    }
+    .benchmark-format-note p {
+      margin: 0 0 6px 0;
+    }
+    .benchmark-format-note ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+    .benchmark-clear-row {
+      margin: 2px 0 8px 0;
     }
 
     /* ---- Guide Page ---- */
@@ -1035,7 +1092,7 @@ ui <- fluidPage(
         </tr>
         <tr>
           <td><code>outputs/data/pov_comparison_detailed.xlsx</code></td>
-          <td>Detailed comparison of all poverty estimates (Direct, FH, FH Benchmarked, MFH, MFH Benchmarked) with CVs, MSEs, and RMSEs for every domain and year.</td>
+          <td>Detailed comparison of Direct, FH, and MFH estimates with CVs, MSEs, and RMSEs for every domain and year. Benchmark columns are included only when Apply benchmarking is selected.</td>
         </tr>
         <tr>
           <td><code>outputs/data/statistical_significance_comparison.xlsx</code></td>
@@ -1088,19 +1145,19 @@ ui <- fluidPage(
       h4("Data inputs"),
       tags$div(
         style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
-        "Use Browse to select the required .rds datasets from any folder on your computer: household survey, auxiliary covariates, and shapefiles/geometries. If a saved setup is loaded, its active files are shown below each Browse button; browse again only when changing a file."
+        "Use Browse to select the required input files from any folder on your computer: household survey, auxiliary covariates, and shapefiles/geometries. Survey and auxiliary files can be .rds, .csv, .dta, or Excel files; geometry files can be .rds, zipped shapefiles, GeoPackage, or GeoJSON. If a saved setup is loaded, its active files are shown below each Browse button; browse again only when changing a file."
       ),
       fileInput("survey_file",
-        tip_label("Browse Survey data file (.rds)", "Choose the household survey .rds file from any folder on your computer. If a saved setup is loaded, this Browse button is only needed when changing the survey file."),
-        accept = ".rds"),
+        tip_label("Browse Survey data file", "Choose the household survey file from any folder on your computer. Accepted formats: .rds, .RData/.rda, .csv, .tsv, .txt, .dta, .xlsx, .xls."),
+        accept = c(".rds", ".RData", ".rda", ".csv", ".tsv", ".txt", ".dta", ".xlsx", ".xls")),
       uiOutput("survey_active_file"),
       fileInput("rhs_file",
-        tip_label("Browse Auxiliary data file (.rds)", "Choose the auxiliary covariates .rds file from any folder on your computer. If a saved setup is loaded, this Browse button is only needed when changing the auxiliary file."),
-        accept = ".rds"),
+        tip_label("Browse Auxiliary data file", "Choose the auxiliary covariates file from any folder on your computer. Accepted formats: .rds, .RData/.rda, .csv, .tsv, .txt, .dta, .xlsx, .xls."),
+        accept = c(".rds", ".RData", ".rda", ".csv", ".tsv", ".txt", ".dta", ".xlsx", ".xls")),
       uiOutput("rhs_active_file"),
       fileInput("shp_file",
-        tip_label("Browse Shapefile/geometries file (.rds)", "Choose the shapefiles/geometries .rds file from any folder on your computer. If a saved setup is loaded, this Browse button is only needed when changing the shapefile."),
-        accept = ".rds"),
+        tip_label("Browse Shapefile/geometries file", "Choose the geometry file from any folder on your computer. Accepted formats: .rds, .RData/.rda, zipped shapefile .zip, .shp, .gpkg, .geojson, .json, .kml, .gml. For ESRI shapefiles, a .zip containing .shp/.dbf/.shx is recommended."),
+        accept = c(".rds", ".RData", ".rda", ".zip", ".shp", ".gpkg", ".geojson", ".json", ".kml", ".gml")),
       uiOutput("shp_active_file"),
       checkboxInput("do_benchmark",
         tip_label("Apply benchmarking", "If checked, UFH and MFH estimates are benchmarked. If unchecked, uploaded benchmark files and benchmark-level mappings are ignored for the next run."),
@@ -1110,6 +1167,26 @@ ui <- fluidPage(
         fileInput("regional_benchmark_file",
           tip_label("Benchmark Target Database (optional)",
                     "Optional RDS/CSV/XLSX file with benchmark targets by year. Leave blank to estimate targets from the survey using population_weight = weight * household size.")),
+        tags$div(
+          class = "benchmark-format-note",
+          tags$div(class = "note-title", "External benchmark file format"),
+          tags$p(
+            "Upload this file only when you have external benchmark targets. ",
+            "Leave it blank to estimate targets from the survey."
+          ),
+          tags$ul(
+            tags$li("National benchmarking: include a year column and a target column."),
+            tags$li("Grouped benchmarking: also include the benchmark-level column selected below."),
+            tags$li("Target column names can be benchmark, target, value, poverty_rate, rate, or mean."),
+            tags$li("Accepted file types: .rds, .RData/.rda, .csv, .txt, .xlsx, or .xls.")
+          )
+        ),
+        tags$div(
+          class = "benchmark-clear-row",
+          actionButton("clear_benchmark_file",
+            "Clear selected file",
+            class = "btn-default btn-sm")
+        ),
         uiOutput("benchmark_active_file"),
         mapping_selectize("var_benchmark_level",
           tip_label("Benchmark level",
@@ -1461,6 +1538,7 @@ server <- function(input, output, session) {
   readiness_checked <- reactiveVal(FALSE)
   restoring_setup   <- reactiveVal(FALSE)
   active_setup_files <- reactiveVal(dashboard_setup_defaults()$data_files)
+  benchmark_upload_cleared <- reactiveVal(FALSE)
   setup_status_text  <- reactiveVal("Using default dashboard settings.")
 
   append_log <- function(msg) {
@@ -1629,7 +1707,11 @@ server <- function(input, output, session) {
         survey_file = selected_setup_file_ref(input$survey_file, "survey_file"),
         rhs_file = selected_setup_file_ref(input$rhs_file, "rhs_file"),
         shp_file = selected_setup_file_ref(input$shp_file, "shp_file"),
-        regional_benchmark_file = selected_setup_file_ref(input$regional_benchmark_file, "regional_benchmark_file"),
+        regional_benchmark_file = if (isTRUE(benchmark_upload_cleared())) {
+          ""
+        } else {
+          selected_setup_file_ref(input$regional_benchmark_file, "regional_benchmark_file")
+        },
         population_file = selected_setup_file_ref(input$population_file, "population_file")
       ),
       inputs = inputs
@@ -1648,6 +1730,7 @@ server <- function(input, output, session) {
     }, add = TRUE)
 
     active_setup_files(setup$data_files)
+    benchmark_upload_cleared(FALSE)
     setup_status_text(sprintf(
       "Loaded %s%s.",
       label,
@@ -1662,11 +1745,23 @@ server <- function(input, output, session) {
     f <- setup$data_files
     update_mapping_select <- function(id, value) {
       value <- value %||% ""
+      cols <- if (exists("columns_for_mapping_id", inherits = FALSE)) {
+        columns_for_mapping_id(id)
+      } else {
+        character()
+      }
       updateSelectizeInput(
         session,
         id,
-        choices = unique(c("", value)),
-        selected = value
+        choices = unique(c("", cols, value)),
+        selected = value,
+        options = list(
+          create = TRUE,
+          createOnBlur = TRUE,
+          persist = FALSE,
+          maxOptions = max(1000L, length(cols) + 5L)
+        ),
+        server = TRUE
       )
     }
 
@@ -1738,6 +1833,11 @@ server <- function(input, output, session) {
     }, once = TRUE)
 
     readiness_checked(FALSE)
+    session$onFlushed(function() {
+      if (exists("refresh_all_mapping_choices", inherits = FALSE)) {
+        refresh_all_mapping_choices()
+      }
+    }, once = TRUE)
     invisible(TRUE)
   }
 
@@ -1855,7 +1955,8 @@ server <- function(input, output, session) {
     )
   })
 
-  active_file_ui <- function(label, file_input, key, required = FALSE) {
+  active_file_ui <- function(label, file_input, key, required = FALSE,
+                             margin = "-12px 0 12px 0") {
     uploaded <- !is.null(file_input) &&
       !is.null(file_input$name) &&
       nzchar(file_input$name %||% "")
@@ -1880,7 +1981,7 @@ server <- function(input, output, session) {
     }
 
     tags$div(
-      style = sprintf("font-size: 12px; color: %s; margin: -12px 0 12px 0;", color),
+      style = sprintf("font-size: 12px; color: %s; margin: %s;", color, margin),
       msg
     )
   }
@@ -1895,21 +1996,34 @@ server <- function(input, output, session) {
     active_file_ui("shapefiles file", input$shp_file, "shp_file", required = TRUE)
   })
   output$benchmark_active_file <- renderUI({
-    active_file_ui("benchmark target", input$regional_benchmark_file, "regional_benchmark_file", required = FALSE)
+    if (isTRUE(benchmark_upload_cleared())) {
+      return(tags$div(
+        style = "font-size: 12px; color: #666; margin: 6px 0 12px 0;",
+        "Active benchmark target: none"
+      ))
+    }
+    active_file_ui(
+      "benchmark target",
+      input$regional_benchmark_file,
+      "regional_benchmark_file",
+      required = FALSE,
+      margin = "6px 0 12px 0"
+    )
   })
   output$population_active_file <- renderUI({
     active_file_ui("population file", input$population_file, "population_file", required = FALSE)
   })
 
-  read_dataset_columns <- function(path) {
+  read_dataset_columns <- function(path, kind = c("table", "geometry")) {
+    kind <- match.arg(kind)
     path <- path %||% ""
     if (!nzchar(path) || !file.exists(path)) {
       return(character())
     }
-    cols <- tryCatch({
-      obj <- readRDS(path)
-      names(obj)
-    }, error = function(e) character())
+    cols <- tryCatch(
+      sae_read_input_names(path, kind = kind),
+      error = function(e) character()
+    )
     cols <- unique(trimws(as.character(cols %||% character())))
     cols[nzchar(cols)]
   }
@@ -1918,40 +2032,72 @@ server <- function(input, output, session) {
     read_dataset_columns(resolve_data_input(
       input$survey_file,
       fallback = saved_setup_path_for("survey_file")
-    ))
+    ), kind = "table")
   })
 
   rhs_columns <- reactive({
     read_dataset_columns(resolve_data_input(
       input$rhs_file,
       fallback = saved_setup_path_for("rhs_file")
-    ))
+    ), kind = "table")
   })
 
   shp_columns <- reactive({
     read_dataset_columns(resolve_data_input(
       input$shp_file,
       fallback = saved_setup_path_for("shp_file")
-    ))
+    ), kind = "geometry")
   })
 
-  update_mapping_choices <- function(id, cols) {
-    current <- isolate(input[[id]] %||% "")
+  survey_mapping_ids <- c(
+    "var_year", "var_domain", "var_psu", "var_weight",
+    "var_strata", "var_hh_size", "var_welfare",
+    "var_povline", "var_benchmark_level"
+  )
+
+  columns_for_mapping_id <- function(id) {
+    if (id %in% survey_mapping_ids) {
+      survey_columns()
+    } else if (identical(id, "rhs_domain")) {
+      rhs_columns()
+    } else if (identical(id, "shp_domain")) {
+      shp_columns()
+    } else {
+      character()
+    }
+  }
+
+  update_mapping_choices <- function(id, cols = NULL, selected = NULL) {
+    if (is.null(cols)) cols <- columns_for_mapping_id(id)
+    current <- if (is.null(selected)) isolate(input[[id]] %||% "") else selected
+    current <- trimws(as.character(current %||% ""))
     updateSelectizeInput(
       session,
       id,
       choices = unique(c("", cols, current)),
-      selected = current
+      selected = current,
+      options = list(
+        create = TRUE,
+        createOnBlur = TRUE,
+        persist = FALSE,
+        maxOptions = max(1000L, length(cols) + 5L)
+      ),
+      server = TRUE
     )
+  }
+
+  refresh_all_mapping_choices <- function() {
+    for (id in survey_mapping_ids) {
+      update_mapping_choices(id)
+    }
+    update_mapping_choices("rhs_domain")
+    update_mapping_choices("shp_domain")
+    invisible(TRUE)
   }
 
   observe({
     cols <- survey_columns()
-    for (id in c(
-      "var_year", "var_domain", "var_psu", "var_weight",
-      "var_strata", "var_hh_size", "var_welfare",
-      "var_povline", "var_benchmark_level"
-    )) {
+    for (id in survey_mapping_ids) {
       update_mapping_choices(id, cols)
     }
   })
@@ -2060,6 +2206,13 @@ server <- function(input, output, session) {
     invisible(files)
   }
 
+  clear_active_setup_file <- function(key) {
+    files <- active_setup_files()
+    files[[key]] <- ""
+    active_setup_files(files)
+    invisible(files)
+  }
+
   observeEvent(input$survey_file, {
     if (nzchar(input$survey_file$name %||% "")) {
       set_active_setup_file("survey_file", input$survey_file$name)
@@ -2077,8 +2230,19 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
   observeEvent(input$regional_benchmark_file, {
     if (nzchar(input$regional_benchmark_file$name %||% "")) {
+      benchmark_upload_cleared(FALSE)
       set_active_setup_file("regional_benchmark_file", input$regional_benchmark_file$name)
     }
+  }, ignoreInit = TRUE)
+  observeEvent(input$clear_benchmark_file, {
+    benchmark_upload_cleared(TRUE)
+    clear_active_setup_file("regional_benchmark_file")
+    session$sendCustomMessage("clearFileInput", "regional_benchmark_file")
+    showNotification(
+      "Benchmark Target Database cleared. Leave Apply benchmarking checked to use survey-direct benchmark targets, or uncheck it to run without benchmarking.",
+      type = "message",
+      duration = 6
+    )
   }, ignoreInit = TRUE)
   observeEvent(input$population_file, {
     if (nzchar(input$population_file$name %||% "")) {
@@ -2237,13 +2401,13 @@ server <- function(input, output, session) {
     rhs_path <- resolve_data_input(input$rhs_file, fallback = saved_setup_path_for("rhs_file"))
     shp_path <- resolve_data_input(input$shp_file, fallback = saved_setup_path_for("shp_file"))
     if (!file.exists(survey_path %||% "")) {
-      actions <- c(actions, sprintf("- Choose the household survey `.rds` file with the Survey data Browse button. Resolved path: `%s`.", display_data_path(survey_path)))
+      actions <- c(actions, sprintf("- Choose the household survey file with the Survey data Browse button. Accepted formats include `.rds`, `.csv`, and `.dta`. Resolved path: `%s`.", display_data_path(survey_path)))
     }
     if (!file.exists(rhs_path %||% "")) {
-      actions <- c(actions, sprintf("- Choose the auxiliary covariates `.rds` file with the Auxiliary data Browse button. Resolved path: `%s`.", display_data_path(rhs_path)))
+      actions <- c(actions, sprintf("- Choose the auxiliary covariates file with the Auxiliary data Browse button. Accepted formats include `.rds`, `.csv`, and `.dta`. Resolved path: `%s`.", display_data_path(rhs_path)))
     }
     if (!file.exists(shp_path %||% "")) {
-      actions <- c(actions, sprintf("- Choose the shapefiles/geometries `.rds` file with the Shapefile/geometries Browse button. Resolved path: `%s`.", display_data_path(shp_path)))
+      actions <- c(actions, sprintf("- Choose the shapefiles/geometries file with the Shapefile/geometries Browse button. Accepted formats include `.rds`, zipped shapefile `.zip`, `.gpkg`, and `.geojson`. Resolved path: `%s`.", display_data_path(shp_path)))
     }
 
     if (!requireNamespace("sf", quietly = TRUE)) {
@@ -2489,7 +2653,7 @@ server <- function(input, output, session) {
       showNotification(msg, type = "error", duration = 10)
       return()
     }
-    regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
+    regional_benchmark_path <- if (isTRUE(input$do_benchmark) && !isTRUE(benchmark_upload_cleared())) {
       resolve_upload(input$regional_benchmark_file, fallback = saved_setup_path_for("regional_benchmark_file"))
     } else {
       NULL
@@ -2530,16 +2694,18 @@ server <- function(input, output, session) {
     }
 
     # Validation flags feed into the Preflight tab.
-    flags <- validate_inputs(harmonized$survey, harmonized$rhs)
+    requested_years <- parse_years(input$years)
+    validation_survey <- filter_to_analysis_years(harmonized$survey, requested_years)
+    validation_rhs <- filter_to_analysis_years(harmonized$rhs, requested_years)
+    flags <- validate_inputs(validation_survey, validation_rhs)
     validation_result(flags)
     append_log(sprintf("Validation complete: %d flag(s)", length(flags$flags)))
 
     # Year-variable checks (pre-harmonization) - mirrors the logic inside run_btn.
     year_msgs <- character()
-    survey_raw_check <- tryCatch(readRDS(survey_for_validation), error = function(e) NULL)
-    rhs_raw_check    <- tryCatch(readRDS(rhs_for_validation),    error = function(e) NULL)
+    survey_raw_check <- tryCatch(sae_read_table_input(survey_for_validation, "Survey data"), error = function(e) NULL)
+    rhs_raw_check    <- tryCatch(sae_read_table_input(rhs_for_validation, "Auxiliary covariates"), error = function(e) NULL)
     year_var_name    <- var_map$year
-    requested_years  <- parse_years(input$years)
 
     if (!is.null(survey_raw_check) && !is.null(rhs_raw_check)) {
       survey_has_year <- year_var_name %in% names(survey_raw_check)
@@ -2618,12 +2784,14 @@ server <- function(input, output, session) {
     }
 
     geo_raw <- tryCatch(
-      readRDS(shp_path),
+      sae_read_geometry_input(shp_path, "Geometry data"),
       error = function(e) NULL
     )
+    readiness_survey <- filter_to_analysis_years(harmonized$survey, requested_years)
+    readiness_rhs <- filter_to_analysis_years(harmonized$rhs, requested_years)
     rr <- assess_data_readiness(
-      survey_data    = harmonized$survey,
-      aux_data       = harmonized$rhs,
+      survey_data    = readiness_survey,
+      aux_data       = readiness_rhs,
       geo_data       = geo_raw,
       domain_var     = input$shp_domain,
       save_to        = "outputs/tables",
@@ -2760,7 +2928,7 @@ server <- function(input, output, session) {
       showNotification(msg, type = "error", duration = 10)
       return()
     }
-    regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
+    regional_benchmark_path <- if (isTRUE(input$do_benchmark) && !isTRUE(benchmark_upload_cleared())) {
       resolve_upload(input$regional_benchmark_file, fallback = saved_setup_path_for("regional_benchmark_file"))
     } else {
       NULL
@@ -2826,15 +2994,17 @@ server <- function(input, output, session) {
     if (identical(mfh_cov_val, "rho_sm")) mfh_cov_val <- "rho_sm_out"
 
     if (!is.null(harmonized)) {
-      flags <- validate_inputs(harmonized$survey, harmonized$rhs)
+      validation_survey <- filter_to_analysis_years(harmonized$survey, years)
+      validation_rhs <- filter_to_analysis_years(harmonized$rhs, years)
+      flags <- validate_inputs(validation_survey, validation_rhs)
       validation_result(flags)
       append_log(sprintf("Validation complete: %d flag(s)", length(flags$flags)))
 
       # Data readiness assessment
       # -- Pre-harmonization checks: year variable in raw data --
       year_msgs <- character()
-      survey_raw_check <- tryCatch(readRDS(survey_for_validation), error = function(e) NULL)
-      rhs_raw_check    <- tryCatch(readRDS(rhs_for_validation),    error = function(e) NULL)
+      survey_raw_check <- tryCatch(sae_read_table_input(survey_for_validation, "Survey data"), error = function(e) NULL)
+      rhs_raw_check    <- tryCatch(sae_read_table_input(rhs_for_validation, "Auxiliary covariates"), error = function(e) NULL)
       year_var_name    <- var_map$year  # the user-specified year column name
       requested_years  <- years
 
@@ -2915,12 +3085,14 @@ server <- function(input, output, session) {
       }
 
       geo_raw <- tryCatch(
-        readRDS(shp_path),
+        sae_read_geometry_input(shp_path, "Geometry data"),
         error = function(e) NULL
       )
+      readiness_survey <- filter_to_analysis_years(harmonized$survey, requested_years)
+      readiness_rhs <- filter_to_analysis_years(harmonized$rhs, requested_years)
       rr <- assess_data_readiness(
-        survey_data    = harmonized$survey,
-        aux_data       = harmonized$rhs,
+        survey_data    = readiness_survey,
+        aux_data       = readiness_rhs,
         geo_data       = geo_raw,
         domain_var     = input$shp_domain,
         save_to        = "outputs/tables",
@@ -3005,10 +3177,7 @@ server <- function(input, output, session) {
       dir.create("outputs/figures", showWarnings = FALSE, recursive = TRUE)
 
       # Build per-year diagnostics from raw data
-      yr_list <- sort(unique(harmonized$survey$year))
-      if (length(yr_list) >= 2) {
-        yr_list <- yr_list[1:2]
-      }
+      yr_list <- years
       diag_list  <- list()
       bench_list <- list()
       for (yr in yr_list) {
@@ -3228,7 +3397,11 @@ server <- function(input, output, session) {
         survey_file = selected_setup_file_name(input$survey_file, "survey_file"),
         rhs_file = selected_setup_file_name(input$rhs_file, "rhs_file"),
         shp_file = selected_setup_file_name(input$shp_file, "shp_file"),
-        benchmark_target_file = selected_setup_file_name(input$regional_benchmark_file, "regional_benchmark_file"),
+        benchmark_target_file = if (isTRUE(benchmark_upload_cleared())) {
+          ""
+        } else {
+          selected_setup_file_name(input$regional_benchmark_file, "regional_benchmark_file")
+        },
         population_file = selected_setup_file_name(input$population_file, "population_file"),
         survey_path = survey_path,
         rhs_path = rhs_path,

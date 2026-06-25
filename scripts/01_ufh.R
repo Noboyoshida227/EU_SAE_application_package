@@ -41,8 +41,11 @@ conflicted::conflict_prefer("lag",    "dplyr")
 conflicted::conflict_prefer("first",  "dplyr")
 conflicted::conflict_prefer("recode", "dplyr")
 
+options(survey.lonely.psu = "adjust")
+
 source(here::here("scripts", "ufh_functions.R"))
 source(here::here("scripts", "population_helpers.R"))
+source(here::here("R", "input_readers.R"))
 
 
 # ============================================================
@@ -206,9 +209,9 @@ cat("  survey:", survey_path, "\n")
 cat("  rhs:   ", rhs_path, "\n")
 cat("  shp:   ", shp_path, "\n")
 
-survey_raw <- readRDS(survey_path)  # household-level survey data (incl. region)
-rhs_dt_raw <- readRDS(rhs_path)    # domain-level covariates
-shp_dt     <- readRDS(shp_path)    # province geometries
+survey_raw <- sae_read_table_input(survey_path, "Survey data")  # household-level survey data (incl. region)
+rhs_dt_raw <- sae_read_table_input(rhs_path, "Auxiliary covariates")    # domain-level covariates
+shp_dt     <- sae_read_geometry_input(shp_path, "Geometry data")    # province geometries
 
 # ---- Drop auxiliary domain labels ----
 rhs_dt_raw <- rhs_dt_raw %>% select(-any_of("provlab"))
@@ -227,6 +230,11 @@ if (!is.null(ufh_cfg$var_map)) {
 } else {
   var_map <- default_var_map
 }
+use_strata <- isTRUE({
+  strata_var <- trimws(as.character(var_map$strata %||% ""))
+  length(strata_var) == 1 && !is.na(strata_var) && nzchar(strata_var)
+})
+if (!use_strata) var_map$strata <- ""
 mapped_benchmark_level_var <- benchmark_level_var_cfg
 if (!nzchar(mapped_benchmark_level_var)) {
   mapped_benchmark_level_var <- trimws(as.character(
@@ -273,6 +281,9 @@ if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
   rename_cols <- c(rename_cols, hh_size = var_map$hh_size)
 }
 survey_all <- survey_raw %>% rename(!!!rename_cols)
+if (!use_strata && "strata" %in% names(survey_all)) {
+  survey_all <- survey_all %>% select(-any_of("strata"))
+}
 if (!is.null(var_map$benchmark_level) && nzchar(var_map$benchmark_level) &&
     !"region" %in% names(survey_all) &&
     var_map$benchmark_level %in% unname(rename_cols)) {
@@ -523,7 +534,7 @@ fh_results_list <- list()
 .use_eur_plots <- identical(indicator_type, "mean_welfare") && isTRUE(log_transform)
 
 make_sae_design <- function(data) {
-  if ("strata" %in% names(data) && any(!is.na(data$strata))) {
+  if (isTRUE(use_strata) && "strata" %in% names(data) && any(!is.na(data$strata))) {
     survey::svydesign(
       ids = ~psu,
       strata = ~strata,
@@ -1856,7 +1867,12 @@ pov_fh_combined <- bind_rows(res_y1$pov_fh, res_y2$pov_fh) %>%
     FH_RMSE       = sqrt(FH_MSE),
     FH_Bench_RMSE = sqrt(FH_Bench_MSE)
   )
-writexl::write_xlsx(pov_fh_combined, path = here::here("outputs", "data", "pov_fh.xlsx"))
+.pov_fh_export <- pov_fh_combined
+if (!isTRUE(do_benchmark)) {
+  .pov_fh_export <- .pov_fh_export %>%
+    select(-any_of(c("FH_Bench", "FH_Bench_MSE", "FH_Bench_CV", "FH_Bench_RMSE")))
+}
+writexl::write_xlsx(.pov_fh_export, path = here::here("outputs", "data", "pov_fh.xlsx"))
 cat("Combined results exported to: output/UFH/pov_fh.xlsx\n")
 
 # Save emdi model objects for AI-assisted normality evaluation
@@ -2342,10 +2358,14 @@ ggsave(here::here("outputs", "figures", "ufh_growth_rate_map.png"),
 
 
 write_csv(results_unbench, here::here("outputs", "tables", "statistical_significance_results_unbench.csv"))
-write_csv(results, here::here("outputs", "tables", "statistical_significance_results.csv"))
+if (isTRUE(do_benchmark)) {
+  write_csv(results, here::here("outputs", "tables", "statistical_significance_results.csv"))
+}
 cat("Results saved to:\n")
 cat("  - outputs/tables/statistical_significance_results_unbench.csv (FH, without benchmarking)\n")
-cat("  - outputs/tables/statistical_significance_results.csv (FH_Bench, with benchmarking)\n")
+if (isTRUE(do_benchmark)) {
+  cat("  - outputs/tables/statistical_significance_results.csv (FH_Bench, with benchmarking)\n")
+}
 
 
 sessionInfo()

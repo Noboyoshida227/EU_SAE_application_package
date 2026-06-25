@@ -42,9 +42,12 @@ conflicted::conflict_prefer("lag",    "dplyr")
 conflicted::conflict_prefer("first",  "dplyr")
 conflicted::conflict_prefer("recode", "dplyr")
 
+options(survey.lonely.psu = "adjust")
+
 source(here::here("scripts", "ufh_functions.R"))
 source(here::here("scripts", "mcpe_functions.R"))
 source(here::here("scripts", "population_helpers.R"))
+source(here::here("R", "input_readers.R"))
 
 # ---- Invalidate stale MFH output artifacts ----
 dir.create(here::here("outputs", "data"), showWarnings = FALSE, recursive = TRUE)
@@ -297,9 +300,9 @@ shp_path <- resolve_config_path(
                      here::here("sample_data", "geometries.rds"))
 )
 
-survey_raw <- readRDS(survey_path)   # household-level survey data
-rhs_dt     <- readRDS(rhs_path)      # domain-level covariates
-shp_dt     <- readRDS(shp_path)      # province geometries
+survey_raw <- sae_read_table_input(survey_path, "Survey data")   # household-level survey data
+rhs_dt     <- sae_read_table_input(rhs_path, "Auxiliary covariates")      # domain-level covariates
+shp_dt     <- sae_read_geometry_input(shp_path, "Geometry data")      # province geometries
 
 # ---- Drop auxiliary domain labels ----
 rhs_dt <- rhs_dt %>%
@@ -333,6 +336,12 @@ var_map <- list(
 if (!is.null(mfh_cfg$var_map)) {
   var_map[names(mfh_cfg$var_map)] <- mfh_cfg$var_map
 }
+
+use_strata <- isTRUE({
+  strata_var <- trimws(as.character(var_map$strata %||% ""))
+  length(strata_var) == 1 && !is.na(strata_var) && nzchar(strata_var)
+})
+if (!use_strata) var_map$strata <- ""
 
 benchmark_level <- cfg_or_default(
   mfh_cfg$benchmark_level,
@@ -385,6 +394,9 @@ if (!is.null(var_map$hh_size) && nzchar(var_map$hh_size) &&
   rename_cols_mfh <- c(rename_cols_mfh, hh_size = var_map$hh_size)
 }
 survey_dt <- survey_raw %>% rename(!!!rename_cols_mfh)
+if (!use_strata && "strata" %in% names(survey_dt)) {
+  survey_dt <- survey_dt %>% select(-any_of("strata"))
+}
 # Mean-welfare runs ignore the poverty line; ensure the column exists for
 # any downstream code that references it.
 if (!identical(indicator_type, "poverty") && !"povline" %in% names(survey_dt)) {
@@ -675,7 +687,7 @@ survey_step1 <- survey_dt %>%
 # ---- Define Survey Design ----
 # Direct poverty/indicator estimates are person-weighted by expanding each
 # sampled household by household size: population_weight = weight * hh_size.
-if ("strata" %in% names(survey_step1) && any(!is.na(survey_step1$strata))) {
+if (isTRUE(use_strata) && "strata" %in% names(survey_step1) && any(!is.na(survey_step1$strata))) {
   des <- svydesign(
     ids     = ~psu,
     strata  = ~strata,
@@ -1569,9 +1581,11 @@ if (isTRUE(.model_fit_failed)) {
   write.csv(change_placeholder,
             here::here("outputs", "tables", "comparison_final.csv"),
             row.names = FALSE)
-  write.csv(change_placeholder,
-            here::here("outputs", "tables", "comparison_final_bench.csv"),
-            row.names = FALSE)
+  if (isTRUE(do_benchmark)) {
+    write.csv(change_placeholder,
+              here::here("outputs", "tables", "comparison_final_bench.csv"),
+              row.names = FALSE)
+  }
   write.csv(
     data.frame(
       method = character(),
@@ -3781,6 +3795,14 @@ if (exists("comp12_bench_obj") && !is.null(comp12_bench_obj)) {
 .drop_mfh_cols <- setdiff(.all_mfh_cols, .selected_mfh_cols)
 .mfh_export <- db_wide_all %>%
   select(-any_of(.drop_mfh_cols))
+.benchmark_export_enabled <- isTRUE(do_benchmark) &&
+  exists("bench_result") &&
+  !is.null(bench_result)
+if (!.benchmark_export_enabled) {
+  .benchmark_export_cols <- grep("(^|_)Bench($|_)", names(.mfh_export), value = TRUE)
+  .mfh_export <- .mfh_export %>%
+    select(-any_of(.benchmark_export_cols))
+}
 .write_xlsx_safe(.mfh_export, here::here("outputs", "data", "pov_mfh.xlsx"))
 
 # ---- Display summary ----
