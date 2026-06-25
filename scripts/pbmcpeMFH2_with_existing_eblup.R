@@ -31,13 +31,15 @@ library(Matrix)
 library(matrixcalc)
 
 pbmcpeMFH2_with_existing <- function(formula, vardir, domain_var, existing_model,
-                                     nB = 100, data, max_attempts = NULL, ...) {
+                                     nB = 100, data, max_attempts = NULL,
+                                     seed = 123L, ...) {
   # max_attempts: upper bound on total bootstrap iterations (successes +
   # failures). Prevents the loop from spinning forever when refits keep
   # failing to converge -- e.g., when var_choice = "direct" feeds the
   # bootstrap sampling-error variances that destabilise eblupMFH2's REML.
   # Default = 5 * nB (i.e., we tolerate up to 4*nB consecutive failures).
   if (is.null(max_attempts)) max_attempts <- 5L * nB
+  if (!is.null(seed)) set.seed(seed)
   
   nD <- nrow(data)
   nT <- length(formula)

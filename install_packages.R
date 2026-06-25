@@ -9,6 +9,12 @@
 
 cat("=== EU SAE Shiny App - Package Installer ===\n\n")
 
+.user_lib <- Sys.getenv("R_LIBS_USER", unset = "")
+if (nzchar(.user_lib)) {
+  dir.create(.user_lib, recursive = TRUE, showWarnings = FALSE)
+  .libPaths(unique(c(.user_lib, .libPaths())))
+}
+
 # --- R version check ----------------------------------------
 # Current CRAN dependencies used by the pipeline (notably emdi)
 # require R 4.2.0 or later.
@@ -25,7 +31,7 @@ if (getRversion() < .min_r_version) {
 install_if_missing <- function(pkg, repos = "https://cloud.r-project.org") {
   if (!requireNamespace(pkg, quietly = TRUE)) {
     cat("  Installing:", pkg, "\n")
-    install.packages(pkg, repos = repos, quiet = TRUE)
+    install.packages(pkg, repos = repos, lib = .libPaths()[1], quiet = TRUE)
   } else {
     cat("  OK:", pkg, "\n")
   }
@@ -103,7 +109,16 @@ for (pkg in cran_packages) {
 }
 
 if (length(failed) == 0) {
+  package_versions <- data.frame(
+    package = cran_packages,
+    version = vapply(cran_packages, function(pkg) {
+      as.character(utils::packageVersion(pkg))
+    }, character(1)),
+    stringsAsFactors = FALSE
+  )
+  utils::write.csv(package_versions, "package_versions.lock.csv", row.names = FALSE)
   cat("\n  All packages installed successfully.\n")
+  cat("  Package versions recorded in package_versions.lock.csv.\n")
   cat("  You can now run the app with:  shiny::runApp('app.R')\n\n")
 } else {
   cat("\n  WARNING: The following packages could not be loaded:\n")

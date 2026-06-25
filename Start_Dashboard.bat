@@ -33,24 +33,10 @@ for /f "delims=" %%I in ('where Rscript.exe 2^>nul') do (
   if not defined RSCRIPT set "RSCRIPT=%%I"
 )
 
-REM (2) Try standard 64-bit install location, newest version wins
+REM (2) Try common install locations, newest semantic R version wins
 if not defined RSCRIPT (
-  for /d %%D in ("C:\Program Files\R\R-*") do (
-    if exist "%%~D\bin\Rscript.exe" set "RSCRIPT=%%~D\bin\Rscript.exe"
-  )
-)
-
-REM (3) Try 32-bit install location
-if not defined RSCRIPT (
-  for /d %%D in ("C:\Program Files (x86)\R\R-*") do (
-    if exist "%%~D\bin\Rscript.exe" set "RSCRIPT=%%~D\bin\Rscript.exe"
-  )
-)
-
-REM (4) Try user-local install location
-if not defined RSCRIPT (
-  for /d %%D in ("%LOCALAPPDATA%\Programs\R\R-*") do (
-    if exist "%%~D\bin\Rscript.exe" set "RSCRIPT=%%~D\bin\Rscript.exe"
+  for /f "delims=" %%I in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$roots = @(''C:\Program Files\R'', ''C:\Program Files (x86)\R'', \"$env:LOCALAPPDATA\Programs\R\"); $candidates = foreach ($root in $roots) { if (Test-Path -LiteralPath $root) { Get-ChildItem -LiteralPath $root -Directory -Filter ''R-*'' | ForEach-Object { $exe = Join-Path $_.FullName ''bin\Rscript.exe''; if (Test-Path -LiteralPath $exe) { [pscustomobject]@{ Version = [version]($_.Name -replace ''^R-'', ''''); Exe = $exe } } } }; $candidates | Sort-Object Version -Descending | Select-Object -First 1 -ExpandProperty Exe" 2^>nul') do (
+    if not defined RSCRIPT set "RSCRIPT=%%I"
   )
 )
 

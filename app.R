@@ -1,5 +1,14 @@
 library(shiny)
 
+# Shiny's default upload limit is 5 MB, which is too small for many survey,
+# auxiliary, and geometry RDS files. Users can override this before launching:
+# Sys.setenv(SAE_SHINY_MAX_UPLOAD_MB = "1000")
+.upload_limit_mb <- suppressWarnings(as.numeric(Sys.getenv("SAE_SHINY_MAX_UPLOAD_MB", "500")))
+if (!is.finite(.upload_limit_mb) || .upload_limit_mb < 5) {
+  .upload_limit_mb <- 500
+}
+options(shiny.maxRequestSize = .upload_limit_mb * 1024^2)
+
 # ---- Startup validation ----
 # Check R version (>= 4.2 required by current CRAN dependencies)
 if (getRversion() < "4.2.0") {
@@ -138,6 +147,94 @@ missing_data_inputs <- function(survey_path, rhs_path, shp_path) {
              Auxiliary = rhs_path %||% "",
              Geometry = shp_path %||% "")
   names(paths)[!nzchar(paths) | !file.exists(paths)]
+}
+
+dashboard_setup_path <- function() {
+  file.path("app_runs", "_last_dashboard_setup.yml")
+}
+
+dashboard_setup_defaults <- function() {
+  list(
+    version = 1L,
+    saved_at = NULL,
+    data_files = list(
+      survey_file = "",
+      rhs_file = "",
+      shp_file = "",
+      regional_benchmark_file = "",
+      population_file = ""
+    ),
+    inputs = list(
+      years = "2012,2013",
+      run_label = "",
+      steps = c("UFH", "MFH", "Comparison"),
+      do_benchmark = FALSE,
+      var_benchmark_level = "",
+      var_year = "year",
+      var_domain = "prov",
+      var_psu = "ea_id",
+      var_weight = "weight",
+      var_strata = "",
+      var_hh_size = "hhsize",
+      var_welfare = "income",
+      indicator_type = "poverty",
+      povline_type = "column",
+      var_povline = "povline",
+      povline_numeric = 5000,
+      fgt_alpha = "0",
+      currency_symbol = "EUR",
+      rhs_domain = "prov",
+      shp_domain = "prov",
+      ufh_transformation = "arcsin",
+      ufh_backtrans = "bc",
+      ufh_var_choice = "sm_out",
+      ufh_ic_criterion = "BIC",
+      ufh_candidates_y1 = "",
+      ufh_candidates_y2 = "",
+      mfh_transformation = "no",
+      mfh_backtrans = "bc_sm",
+      mfh_ic_criterion = "AIC",
+      mfh_var_choice = "sm_out",
+      mfh_cov_choice = "rho_sm_out",
+      mfh_diag_model = "MFH2",
+      fit_mfh3 = FALSE,
+      mfh_candidates_y1 = "",
+      mfh_candidates_y2 = "",
+      psu_consistent = FALSE,
+      llm_enabled = FALSE,
+      language = "en"
+    )
+  )
+}
+
+read_dashboard_setup <- function(path = dashboard_setup_path()) {
+  if (!file.exists(path) || !requireNamespace("yaml", quietly = TRUE)) {
+    return(NULL)
+  }
+  tryCatch(yaml::read_yaml(path), error = function(e) NULL)
+}
+
+write_dashboard_setup <- function(setup, path = dashboard_setup_path()) {
+  if (!requireNamespace("yaml", quietly = TRUE)) {
+    stop("Package 'yaml' is required to save dashboard setup.", call. = FALSE)
+  }
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  yaml::write_yaml(setup, path)
+  normalizePath(path, winslash = "/", mustWork = FALSE)
+}
+
+setup_file_path <- function(file_name) {
+  file_name <- trimws(as.character(file_name %||% ""))
+  if (!nzchar(file_name)) {
+    return(NULL)
+  }
+  normalizePath(file.path(data_dir_path(), basename(file_name)),
+                winslash = "/", mustWork = FALSE)
+}
+
+setup_file_exists <- function(file_name) {
+  path <- setup_file_path(file_name)
+  !is.null(path) && file.exists(path)
 }
 
 validate_mapped_input_columns <- function(survey_raw, rhs_raw, var_map, rhs_domain,
@@ -915,18 +1012,39 @@ ui <- fluidPage(
       ),
       tags$hr(),
 
+      # ---- Reusable setup ----
+      h4("Saved setup"),
+      tags$div(
+        style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
+        "Save or reload dashboard settings so later runs only require small edits. Saved data selections use file names in the package data/ subfolder and are shown as active files below."
+      ),
+      div(
+        style = "display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;",
+        actionButton("load_setup_btn", "Load Last Setup", class = "btn-default btn-sm"),
+        actionButton("save_setup_btn", "Save Current Setup", class = "btn-default btn-sm"),
+        actionButton("reset_setup_btn", "Reset to Defaults", class = "btn-warning btn-sm")
+      ),
+      uiOutput("saved_setup_status"),
+      tags$hr(),
+
       # ---- Data inputs ----
       h4("Data inputs"),
       tags$div(
         style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
-        "Before running the app, users must place all three required .rds datasets in the package data/ subfolder: household survey, auxiliary covariates, and shapefiles/geometries. File names can be anything; use the three file boxes below to choose those files."
+        "Before running the app, users must place the required .rds datasets in the package data/ subfolder. Use Browse to select the survey, auxiliary, and shapefile datasets from data/. If a saved setup is loaded, its active files are shown below each Browse button."
       ),
       fileInput("survey_file",
-        tip_label("Survey data (.rds)", "Household-level records with columns for year, domain, PSU, weight, welfare variable, poverty line, and poverty indicator. Choose the file from the package data/ subfolder.")),
+        tip_label("Browse Survey data file in data/", "Choose the household survey .rds file from the package data/ subfolder. If a saved setup is loaded, this Browse button is only needed when changing the survey file."),
+        accept = ".rds"),
+      uiOutput("survey_active_file"),
       fileInput("rhs_file",
-        tip_label("Auxiliary covariates (.rds)", "Domain-level covariates used as regressors in the Fay-Herriot models. Choose the file from the package data/ subfolder.")),
+        tip_label("Browse Auxiliary data file in data/", "Choose the auxiliary covariates .rds file from the package data/ subfolder. If a saved setup is loaded, this Browse button is only needed when changing the auxiliary file."),
+        accept = ".rds"),
+      uiOutput("rhs_active_file"),
       fileInput("shp_file",
-        tip_label("Shapefiles (.rds)", "An sf object with domain polygons for poverty mapping. Choose the file from the package data/ subfolder.")),
+        tip_label("Browse Shapefile in data/", "Choose the shapefiles/geometries .rds file from the package data/ subfolder. If a saved setup is loaded, this Browse button is only needed when changing the shapefile."),
+        accept = ".rds"),
+      uiOutput("shp_active_file"),
       checkboxInput("do_benchmark",
         tip_label("Apply benchmarking", "If checked, UFH and MFH estimates are benchmarked. If unchecked, uploaded benchmark files and benchmark-level mappings are ignored for the next run."),
         value = FALSE),
@@ -935,6 +1053,7 @@ ui <- fluidPage(
         fileInput("regional_benchmark_file",
           tip_label("Benchmark Target Database (optional)",
                     "Optional RDS/CSV/XLSX file with benchmark targets by year. Leave blank to estimate targets from the survey using population_weight = weight * household size.")),
+        uiOutput("benchmark_active_file"),
         textInput("var_benchmark_level",
           tip_label("Benchmark level",
                     "Optional survey column for grouped benchmarking, such as region, NUTS2, or voivodeship. Leave blank for national benchmarking."),
@@ -943,6 +1062,7 @@ ui <- fluidPage(
       fileInput("population_file",
         tip_label("Domain population sizes (optional)",
                   "Optional RDS/CSV/XLSX file with domain population sizes. Supports long domain-year-population format or wide domain-by-year format; leave blank to estimate domain populations from the survey as sum(weight * household size).")),
+      uiOutput("population_active_file"),
       tags$hr(),
 
       # ---- Variable mapping ----
@@ -1277,6 +1397,9 @@ server <- function(input, output, session) {
   # user is forced to review the preflight and readiness results before running
   # the analysis.
   readiness_checked <- reactiveVal(FALSE)
+  restoring_setup   <- reactiveVal(FALSE)
+  active_setup_files <- reactiveVal(dashboard_setup_defaults()$data_files)
+  setup_status_text  <- reactiveVal("Using default dashboard settings.")
 
   append_log <- function(msg) {
     stamp <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
@@ -1361,6 +1484,176 @@ server <- function(input, output, session) {
     lines
   }
 
+  selected_setup_file_name <- function(file_input, key) {
+    upload_name <- file_input$name %||% ""
+    if (nzchar(upload_name)) {
+      return(basename(upload_name))
+    }
+    file_name <- setup_file_name_for(key)
+    if (nzchar(file_name)) file_name else ""
+  }
+
+  setup_file_input_id <- function(key) {
+    switch(
+      key,
+      NULL
+    )
+  }
+
+  setup_file_name_for <- function(key) {
+    input_id <- setup_file_input_id(key)
+    typed_name <- if (!is.null(input_id)) trimws(input[[input_id]] %||% "") else ""
+    if (nzchar(typed_name)) {
+      return(basename(typed_name))
+    }
+    active_setup_files()[[key]] %||% ""
+  }
+
+  saved_setup_path_for <- function(key) {
+    file_name <- setup_file_name_for(key)
+    path <- setup_file_path(file_name)
+    if (!is.null(path) && file.exists(path)) path else NULL
+  }
+
+  collect_dashboard_setup <- function() {
+    defaults <- dashboard_setup_defaults()
+    inputs <- defaults$inputs
+
+    input_ids <- names(inputs)
+    for (id in input_ids) {
+      val <- input[[id]]
+      if (!is.null(val)) {
+        inputs[[id]] <- val
+      }
+    }
+
+    # Never persist API keys. Remember only whether the AI section was enabled
+    # and the language selection; users re-enter credentials per session.
+    inputs$api_key <- NULL
+
+    list(
+      version = 1L,
+      saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+      data_files = list(
+        survey_file = selected_setup_file_name(input$survey_file, "survey_file"),
+        rhs_file = selected_setup_file_name(input$rhs_file, "rhs_file"),
+        shp_file = selected_setup_file_name(input$shp_file, "shp_file"),
+        regional_benchmark_file = selected_setup_file_name(input$regional_benchmark_file, "regional_benchmark_file"),
+        population_file = selected_setup_file_name(input$population_file, "population_file")
+      ),
+      inputs = inputs
+    )
+  }
+
+  apply_dashboard_setup <- function(setup, label = "saved setup") {
+    defaults <- dashboard_setup_defaults()
+    setup <- setup %||% defaults
+    setup$inputs <- modifyList(defaults$inputs, setup$inputs %||% list())
+    setup$data_files <- modifyList(defaults$data_files, setup$data_files %||% list())
+
+    restoring_setup(TRUE)
+    on.exit({
+      session$onFlushed(function() restoring_setup(FALSE), once = TRUE)
+    }, add = TRUE)
+
+    active_setup_files(setup$data_files)
+    setup_status_text(sprintf(
+      "Loaded %s%s.",
+      label,
+      if (!is.null(setup$saved_at) && nzchar(setup$saved_at %||% "")) {
+        paste0(" saved at ", setup$saved_at)
+      } else {
+        ""
+      }
+    ))
+
+    x <- setup$inputs
+    f <- setup$data_files
+
+    updateTextInput(session, "years", value = x$years %||% defaults$inputs$years)
+    updateTextInput(session, "run_label", value = x$run_label %||% "")
+    updateCheckboxGroupInput(session, "steps",
+                             selected = x$steps %||% defaults$inputs$steps)
+    updateCheckboxInput(session, "do_benchmark",
+                        value = isTRUE(x$do_benchmark))
+    updateTextInput(session, "var_benchmark_level",
+                    value = x$var_benchmark_level %||% "")
+    updateTextInput(session, "var_year", value = x$var_year %||% "year")
+    updateTextInput(session, "var_domain", value = x$var_domain %||% "prov")
+    updateTextInput(session, "var_psu", value = x$var_psu %||% "ea_id")
+    updateTextInput(session, "var_weight", value = x$var_weight %||% "weight")
+    updateTextInput(session, "var_strata", value = x$var_strata %||% "")
+    updateTextInput(session, "var_hh_size", value = x$var_hh_size %||% "hhsize")
+    updateTextInput(session, "var_welfare", value = x$var_welfare %||% "income")
+    updateSelectInput(session, "indicator_type",
+                      selected = x$indicator_type %||% "poverty")
+    updateRadioButtons(session, "povline_type",
+                       selected = x$povline_type %||% "column")
+    updateTextInput(session, "var_povline", value = x$var_povline %||% "povline")
+    updateNumericInput(session, "povline_numeric",
+                       value = x$povline_numeric %||% 5000)
+    updateSelectInput(session, "fgt_alpha",
+                      selected = as.character(x$fgt_alpha %||% "0"))
+    updateTextInput(session, "currency_symbol",
+                    value = x$currency_symbol %||% "EUR")
+    updateTextInput(session, "rhs_domain", value = x$rhs_domain %||% "prov")
+    updateTextInput(session, "shp_domain", value = x$shp_domain %||% "prov")
+    updateSelectInput(session, "ufh_ic_criterion",
+                      selected = x$ufh_ic_criterion %||% "BIC")
+    updateTextInput(session, "ufh_candidates_y1",
+                    value = x$ufh_candidates_y1 %||% "")
+    updateTextInput(session, "ufh_candidates_y2",
+                    value = x$ufh_candidates_y2 %||% "")
+    updateSelectInput(session, "mfh_ic_criterion",
+                      selected = x$mfh_ic_criterion %||% "AIC")
+    updateSelectInput(session, "mfh_var_choice",
+                      selected = x$mfh_var_choice %||% "sm_out")
+    updateSelectInput(session, "mfh_diag_model",
+                      selected = x$mfh_diag_model %||% "MFH2")
+    updateCheckboxInput(session, "fit_mfh3", value = isTRUE(x$fit_mfh3))
+    updateTextInput(session, "mfh_candidates_y1",
+                    value = x$mfh_candidates_y1 %||% "")
+    updateTextInput(session, "mfh_candidates_y2",
+                    value = x$mfh_candidates_y2 %||% "")
+    updateCheckboxInput(session, "psu_consistent",
+                        value = isTRUE(x$psu_consistent))
+    updateCheckboxInput(session, "llm_enabled",
+                        value = isTRUE(x$llm_enabled))
+    updateSelectInput(session, "language", selected = x$language %||% "en")
+
+    session$onFlushed(function() {
+      updateSelectInput(session, "ufh_transformation",
+                        selected = x$ufh_transformation %||% defaults$inputs$ufh_transformation)
+      updateSelectInput(session, "ufh_backtrans",
+                        selected = x$ufh_backtrans %||% defaults$inputs$ufh_backtrans)
+      updateSelectInput(session, "ufh_var_choice",
+                        selected = x$ufh_var_choice %||% defaults$inputs$ufh_var_choice)
+      updateSelectInput(session, "mfh_transformation",
+                        selected = x$mfh_transformation %||% defaults$inputs$mfh_transformation)
+      updateSelectInput(session, "mfh_backtrans",
+                        selected = x$mfh_backtrans %||% defaults$inputs$mfh_backtrans)
+      session$onFlushed(function() {
+        updateSelectInput(session, "mfh_cov_choice",
+                          selected = x$mfh_cov_choice %||% defaults$inputs$mfh_cov_choice)
+      }, once = TRUE)
+    }, once = TRUE)
+
+    readiness_checked(FALSE)
+    invisible(TRUE)
+  }
+
+  save_current_dashboard_setup <- function(reason = "manual") {
+    setup <- collect_dashboard_setup()
+    path <- write_dashboard_setup(setup)
+    active_setup_files(setup$data_files)
+    setup_status_text(sprintf(
+      "Saved current dashboard setup at %s.",
+      setup$saved_at %||% format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+    ))
+    append_log(sprintf("Saved reusable dashboard setup: %s", path))
+    invisible(path)
+  }
+
   # ---- Auto-disable arcsin for FGT(1)/FGT(2) ----
   observeEvent(input$fgt_alpha, {
     if (as.integer(input$fgt_alpha %||% 0) > 0) {
@@ -1433,6 +1726,166 @@ server <- function(input, output, session) {
   output$logs    <- renderText(logs())
   output$run_location <- renderText(run_location())
   output$outputs <- renderTable(output_rows(), striped = TRUE)
+  output$saved_setup_status <- renderUI({
+    file_line <- function(label, key) {
+      nm <- setup_file_name_for(key)
+      if (!nzchar(nm)) {
+        return(tags$div(tags$strong(label), ": not set"))
+      }
+      ok <- setup_file_exists(nm)
+      tags$div(
+        tags$strong(label), ": ", basename(nm),
+        tags$span(
+          style = sprintf("color:%s;", if (ok) "#2e7d32" else "#b26a00"),
+          if (ok) " (found)" else " (not found in data/)"
+        )
+      )
+    }
+    tags$div(
+      style = "font-size: 12px; color: #556; background: #f7f7f7; border: 1px solid #ddd; border-radius: 6px; padding: 8px; margin-bottom: 8px;",
+      tags$div(setup_status_text()),
+      file_line("Survey", "survey_file"),
+      file_line("Auxiliary", "rhs_file"),
+      file_line("Shapefiles", "shp_file"),
+      if (nzchar(setup_file_name_for("regional_benchmark_file"))) {
+        file_line("Benchmark target", "regional_benchmark_file")
+      },
+      if (nzchar(setup_file_name_for("population_file"))) {
+        file_line("Population", "population_file")
+      }
+    )
+  })
+
+  active_file_ui <- function(label, file_input, key, required = FALSE) {
+    uploaded <- !is.null(file_input) &&
+      !is.null(file_input$name) &&
+      nzchar(file_input$name %||% "")
+    path <- resolve_upload(file_input, fallback = saved_setup_path_for(key))
+    saved_name <- setup_file_name_for(key)
+
+    if (uploaded) {
+      msg <- sprintf("Active %s: %s (new upload for this session)", label, basename(file_input$name))
+      color <- "#2e7d32"
+    } else if (!is.null(path) && nzchar(path) && file.exists(path)) {
+      msg <- sprintf("Active %s: data/%s", label, basename(path))
+      color <- "#2e7d32"
+    } else if (nzchar(saved_name)) {
+      msg <- sprintf("Saved %s file not found in data/: %s", label, basename(saved_name))
+      color <- "#b26a00"
+    } else if (isTRUE(required)) {
+      msg <- sprintf("Active %s: none selected", label)
+      color <- "#b26a00"
+    } else {
+      msg <- sprintf("Active %s: none", label)
+      color <- "#666"
+    }
+
+    tags$div(
+      style = sprintf("font-size: 12px; color: %s; margin: -12px 0 12px 0;", color),
+      msg
+    )
+  }
+
+  output$survey_active_file <- renderUI({
+    active_file_ui("survey file", input$survey_file, "survey_file", required = TRUE)
+  })
+  output$rhs_active_file <- renderUI({
+    active_file_ui("auxiliary file", input$rhs_file, "rhs_file", required = TRUE)
+  })
+  output$shp_active_file <- renderUI({
+    active_file_ui("shapefiles file", input$shp_file, "shp_file", required = TRUE)
+  })
+  output$benchmark_active_file <- renderUI({
+    active_file_ui("benchmark target", input$regional_benchmark_file, "regional_benchmark_file", required = FALSE)
+  })
+  output$population_active_file <- renderUI({
+    active_file_ui("population file", input$population_file, "population_file", required = FALSE)
+  })
+
+  set_active_setup_file <- function(key, file_name) {
+    if (!nzchar(file_name %||% "")) {
+      return(invisible(NULL))
+    }
+    files <- active_setup_files()
+    files[[key]] <- basename(file_name)
+    active_setup_files(files)
+    invisible(files)
+  }
+
+  observeEvent(input$survey_file, {
+    if (nzchar(input$survey_file$name %||% "")) {
+      set_active_setup_file("survey_file", input$survey_file$name)
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$rhs_file, {
+    if (nzchar(input$rhs_file$name %||% "")) {
+      set_active_setup_file("rhs_file", input$rhs_file$name)
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$shp_file, {
+    if (nzchar(input$shp_file$name %||% "")) {
+      set_active_setup_file("shp_file", input$shp_file$name)
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$regional_benchmark_file, {
+    if (nzchar(input$regional_benchmark_file$name %||% "")) {
+      set_active_setup_file("regional_benchmark_file", input$regional_benchmark_file$name)
+    }
+  }, ignoreInit = TRUE)
+  observeEvent(input$population_file, {
+    if (nzchar(input$population_file$name %||% "")) {
+      set_active_setup_file("population_file", input$population_file$name)
+    }
+  }, ignoreInit = TRUE)
+
+  observeEvent(input$save_setup_btn, {
+    tryCatch({
+      path <- save_current_dashboard_setup("manual")
+      showNotification(
+        paste("Dashboard setup saved:", normalizePath(path, winslash = "/", mustWork = FALSE)),
+        type = "message", duration = 6
+      )
+    }, error = function(e) {
+      showNotification(paste("Could not save dashboard setup:", e$message),
+                       type = "error", duration = 8)
+    })
+  })
+
+  observeEvent(input$load_setup_btn, {
+    setup <- read_dashboard_setup()
+    if (is.null(setup)) {
+      showNotification(
+        "No saved dashboard setup was found. Run the app once or click 'Save Current Setup' first.",
+        type = "warning", duration = 8
+      )
+      return()
+    }
+    apply_dashboard_setup(setup, "last setup")
+    append_log(sprintf(
+      "Loaded reusable dashboard setup: %s",
+      normalizePath(dashboard_setup_path(), winslash = "/", mustWork = FALSE)
+    ))
+    showNotification("Loaded the last saved dashboard setup.", type = "message", duration = 5)
+  })
+
+  observeEvent(input$reset_setup_btn, {
+    apply_dashboard_setup(dashboard_setup_defaults(), "default setup")
+    if (file.exists(dashboard_setup_path())) {
+      unlink(dashboard_setup_path(), force = TRUE)
+    }
+    append_log("Reset dashboard controls to default setup.")
+    showNotification(
+      "Dashboard controls reset to defaults and the saved local setup was cleared.",
+      type = "message", duration = 8
+    )
+  })
+
+  session$onFlushed(function() {
+    setup <- read_dashboard_setup()
+    if (!is.null(setup)) {
+      apply_dashboard_setup(setup, "last setup")
+    }
+  }, once = TRUE)
 
   output$preflight_ui <- renderUI({
     build_check <- function(label, ok, detail) {
@@ -1449,9 +1902,9 @@ server <- function(input, output, session) {
     }
 
     has_file <- function(path) nzchar(path %||% "") && file.exists(path)
-    survey_path <- resolve_data_input(input$survey_file, fallback = NULL)
-    rhs_path <- resolve_data_input(input$rhs_file, fallback = NULL)
-    shp_path <- resolve_data_input(input$shp_file, fallback = NULL)
+    survey_path <- resolve_data_input(input$survey_file, fallback = saved_setup_path_for("survey_file"))
+    rhs_path <- resolve_data_input(input$rhs_file, fallback = saved_setup_path_for("rhs_file"))
+    shp_path <- resolve_data_input(input$shp_file, fallback = saved_setup_path_for("shp_file"))
 
     root_ok <- all(file.exists(c("app_support.R", "scripts/01_ufh.R", "scripts/02_mfh.R", "scripts/03_comparison.R")))
     years_vec <- parse_years(input$years)
@@ -1529,9 +1982,9 @@ server <- function(input, output, session) {
       actions <- c(actions, "- Set `Analysis years` to exactly two comma-separated years.")
     }
 
-    survey_path <- resolve_data_input(input$survey_file, fallback = NULL)
-    rhs_path <- resolve_data_input(input$rhs_file, fallback = NULL)
-    shp_path <- resolve_data_input(input$shp_file, fallback = NULL)
+    survey_path <- resolve_data_input(input$survey_file, fallback = saved_setup_path_for("survey_file"))
+    rhs_path <- resolve_data_input(input$rhs_file, fallback = saved_setup_path_for("rhs_file"))
+    shp_path <- resolve_data_input(input$shp_file, fallback = saved_setup_path_for("shp_file"))
     if (!file.exists(survey_path %||% "")) {
       actions <- c(actions, sprintf("- Put the household survey `.rds` file in the package `data/` subfolder, then choose it in the Survey data file box. Resolved path: `%s`.", display_data_path(survey_path)))
     }
@@ -1725,6 +2178,9 @@ server <- function(input, output, session) {
   # the user to re-run "Check Data Readiness" if they change any
   # setting that could change the readiness verdict.
   observe({
+    if (isTRUE(restoring_setup())) {
+      return()
+    }
     # Touch each input so this observer reacts to any of them.
     list(
       # Files and variable mapping
@@ -1765,9 +2221,9 @@ server <- function(input, output, session) {
     logs("")
     append_log("Running preflight and data readiness checks...")
 
-    survey_path <- resolve_data_input(input$survey_file)
-    rhs_path    <- resolve_data_input(input$rhs_file)
-    shp_path    <- resolve_data_input(input$shp_file)
+    survey_path <- resolve_data_input(input$survey_file, fallback = saved_setup_path_for("survey_file"))
+    rhs_path    <- resolve_data_input(input$rhs_file, fallback = saved_setup_path_for("rhs_file"))
+    shp_path    <- resolve_data_input(input$shp_file, fallback = saved_setup_path_for("shp_file"))
     append_log(paste("Survey data path:", display_data_path(survey_path)))
     append_log(paste("Auxiliary data path:", display_data_path(rhs_path)))
     append_log(paste("Geometry data path:", display_data_path(shp_path)))
@@ -1783,14 +2239,17 @@ server <- function(input, output, session) {
       return()
     }
     regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
-      resolve_upload(input$regional_benchmark_file)
+      resolve_upload(input$regional_benchmark_file, fallback = saved_setup_path_for("regional_benchmark_file"))
     } else {
       NULL
     }
     population_path <- if (isTRUE(input$do_benchmark)) {
-      resolve_upload(input$population_file)
+      resolve_upload(input$population_file, fallback = saved_setup_path_for("population_file"))
     } else {
-      NULL
+      resolve_upload(input$population_file, fallback = saved_setup_path_for("population_file"))
+    }
+    if (!isTRUE(input$do_benchmark) && !is.null(population_path) && nzchar(population_path %||% "")) {
+      append_log("Population file uploaded but benchmarking is off; population file will be saved in the config but not used in this run.")
     }
     var_map     <- get_var_map()
 
@@ -2033,9 +2492,9 @@ server <- function(input, output, session) {
     append_log(paste("Run folder:", run_dir_abs))
     append_log(paste("Archived outputs will be saved to:", run_outputs_abs))
 
-    survey_path <- resolve_data_input(input$survey_file)
-    rhs_path    <- resolve_data_input(input$rhs_file)
-    shp_path    <- resolve_data_input(input$shp_file)
+    survey_path <- resolve_data_input(input$survey_file, fallback = saved_setup_path_for("survey_file"))
+    rhs_path    <- resolve_data_input(input$rhs_file, fallback = saved_setup_path_for("rhs_file"))
+    shp_path    <- resolve_data_input(input$shp_file, fallback = saved_setup_path_for("shp_file"))
     append_log(paste("Survey data path:", display_data_path(survey_path)))
     append_log(paste("Auxiliary data path:", display_data_path(rhs_path)))
     append_log(paste("Geometry data path:", display_data_path(shp_path)))
@@ -2051,14 +2510,17 @@ server <- function(input, output, session) {
       return()
     }
     regional_benchmark_path <- if (isTRUE(input$do_benchmark)) {
-      resolve_upload(input$regional_benchmark_file)
+      resolve_upload(input$regional_benchmark_file, fallback = saved_setup_path_for("regional_benchmark_file"))
     } else {
       NULL
     }
     population_path <- if (isTRUE(input$do_benchmark)) {
-      resolve_upload(input$population_file)
+      resolve_upload(input$population_file, fallback = saved_setup_path_for("population_file"))
     } else {
-      NULL
+      resolve_upload(input$population_file, fallback = saved_setup_path_for("population_file"))
+    }
+    if (!isTRUE(input$do_benchmark) && !is.null(population_path) && nzchar(population_path %||% "")) {
+      append_log("Population file uploaded but benchmarking is off; population file will be saved in the config but not used in this run.")
     }
 
     years          <- parse_years(input$years)
@@ -2512,9 +2974,11 @@ server <- function(input, output, session) {
       ),
       data_inputs     = list(
         data_folder = data_dir_path(),
-        survey_file = input$survey_file$name %||% "",
-        rhs_file = input$rhs_file$name %||% "",
-        shp_file = input$shp_file$name %||% "",
+        survey_file = selected_setup_file_name(input$survey_file, "survey_file"),
+        rhs_file = selected_setup_file_name(input$rhs_file, "rhs_file"),
+        shp_file = selected_setup_file_name(input$shp_file, "shp_file"),
+        benchmark_target_file = selected_setup_file_name(input$regional_benchmark_file, "regional_benchmark_file"),
+        population_file = selected_setup_file_name(input$population_file, "population_file"),
         survey_path = survey_path,
         rhs_path = rhs_path,
         shp_path = shp_path
@@ -2960,9 +3424,20 @@ server <- function(input, output, session) {
           if (!rmarkdown::pandoc_available()) {
             .pandoc_candidates <- c(
               Sys.getenv("RSTUDIO_PANDOC"),
+              dirname(Sys.which("pandoc")),
+              dirname(Sys.which("quarto")),
               file.path(Sys.getenv("ProgramFiles"), "RStudio",
                         "resources", "app", "bin", "quarto", "bin", "tools"),
-              file.path(Sys.getenv("LOCALAPPDATA"), "Pandoc")
+              file.path(Sys.getenv("LOCALAPPDATA"), "Pandoc"),
+              "/Applications/RStudio.app/Contents/Resources/app/bin/quarto/bin/tools",
+              "/Applications/RStudio.app/Contents/Resources/app/quarto/bin/tools",
+              "/Applications/Quarto.app/Contents/Resources/app/bin/tools",
+              "/Applications/Quarto.app/Contents/Resources/app/quarto/bin/tools",
+              "/usr/lib/rstudio/resources/app/bin/quarto/bin/tools",
+              "/usr/lib/rstudio/resources/app/quarto/bin/tools",
+              "/usr/local/bin",
+              "/opt/homebrew/bin",
+              "/usr/bin"
             )
             for (.p in .pandoc_candidates) {
               if (nzchar(.p) &&
@@ -3022,6 +3497,11 @@ server <- function(input, output, session) {
       })
       status("Completed successfully")
       progress$set(value = n_steps, detail = "Complete")
+      tryCatch({
+        save_current_dashboard_setup("successful run")
+      }, error = function(e) {
+        append_log(paste("WARNING: Could not save reusable dashboard setup:", e$message))
+      })
       append_log("Pipeline finished.")
     } else {
       status("Run failed")

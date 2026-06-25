@@ -520,10 +520,238 @@ enrich_diagnostics_from_output <- function(output_df, yr, model_type = "UFH") {
 # run_pipeline_from_config()
 #
 # Package4 replacement for the Quarto-based pipeline runner. Instead of
-# rendering .qmd files through the Quarto CLI, this version source()'s
-# standalone R scripts (scripts/01_ufh.R, scripts/02_mfh.R, scripts/03_comparison.R) and
-# renders the final report via rmarkdown::render().
+# rendering .qmd files through the Quarto CLI, this version runs standalone
+# R scripts (scripts/01_ufh.R, scripts/02_mfh.R, scripts/03_comparison.R) in
+# child Rscript processes and renders the final report via rmarkdown::render().
 # ---------------------------------------------------------------------------
+.pipeline_step_timeout <- function() {
+  timeout <- suppressWarnings(as.integer(Sys.getenv("SAE_STEP_TIMEOUT_SEC", "7200")))
+  if (!is.finite(timeout) || timeout <= 0) timeout <- 7200L
+  timeout
+}
+
+.pipeline_write_child_output <- function(step, output) {
+  log_dir <- file.path("outputs", "logs")
+  dir.create(log_dir, recursive = TRUE, showWarnings = FALSE)
+  log_path <- file.path(log_dir, paste0(tolower(step), "_child_output.log"))
+  writeLines(as.character(output), con = log_path, useBytes = TRUE)
+  normalizePath(log_path, winslash = "/", mustWork = FALSE)
+}
+
+.pipeline_warning_summary <- function(output) {
+  output <- trimws(as.character(output))
+  output <- output[nzchar(output)]
+  if (length(output) == 0) {
+    return(character())
+  }
+
+  warning_lines <- output[grepl(
+    paste(
+      c(
+        "^Warning messages:$",
+        "^There (were|was) [0-9]+ warning",
+        "^Warning in ",
+        "^Warning:",
+        "^[0-9]+:",
+        "SAVE WARN"
+      ),
+      collapse = "|"
+    ),
+    output
+  )]
+  warning_lines <- unique(warning_lines)
+  warning_lines <- warning_lines[!grepl("^Warning messages:$", warning_lines)]
+
+  if (length(warning_lines) == 0) {
+    return(character())
+  }
+
+  count_lines <- warning_lines[grepl("^There (were|was) [0-9]+ warning", warning_lines)]
+  detail_lines <- setdiff(warning_lines, count_lines)
+  detail_lines <- sub("^SAVE WARN .* ::\\s*", "", detail_lines)
+  detail_lines <- sub("^[0-9]+:\\s*", "", detail_lines)
+  detail_lines <- detail_lines[!grepl("package '.+' was built under R version", detail_lines)]
+  detail_lines <- unique(detail_lines)
+  detail_lines <- head(detail_lines, 3L)
+
+  if (length(count_lines) == 0 && length(detail_lines) == 0) {
+    return(character())
+  }
+
+  c(
+    if (length(count_lines) > 0) {
+      sprintf("Warnings reported: %s. See detailed step log.", count_lines[1])
+    } else {
+      "Warnings reported; see detailed step log."
+    },
+    if (length(detail_lines) > 0) paste0("  - ", detail_lines) else character()
+  )
+}
+
+.pipeline_success_summary <- function(output) {
+  output <- trimws(as.character(output))
+  output <- output[nzchar(output)]
+  if (length(output) == 0) {
+    return(character())
+  }
+
+  setup_lines <- grepl(
+    paste(
+      c(
+        "^Indicator:",
+        "^Analysis years:",
+        "^Transformation:",
+        "^Bias correction:",
+        "^Model-selection criterion:",
+        "^Variance smoothing option:",
+        "population_weight\\s*=\\s*weight \\* hh_size"
+      ),
+      collapse = "|"
+    ),
+    output
+  )
+  status_lines <- grepl(
+    paste(
+      c(
+        "benchmarking enabled",
+        "benchmarking disabled",
+        "Benchmarking complete",
+        "Benchmark groups:",
+        "No population file supplied",
+        "estimated domain populations",
+        "MFH unavailable"
+      ),
+      collapse = "|"
+    ),
+    output,
+    ignore.case = TRUE
+  )
+  key_lines <- output[setup_lines | status_lines]
+
+  unique(head(key_lines, 12L))
+}
+
+.pipeline_failure_excerpt <- function(output, log_path) {
+  output <- trimws(as.character(output))
+  output <- output[nzchar(output)]
+  if (length(output) == 0) {
+    return(character())
+  }
+
+  diagnostic_lines <- output[grepl(
+    paste(
+      c(
+        "^Error", "^Warning", "ERROR", "WARNING", "Execution halted",
+        "failed", "cannot", "can't", "not found", "missing", "Traceback"
+      ),
+      collapse = "|"
+    ),
+    output,
+    ignore.case = TRUE
+  )]
+  excerpt <- unique(c(diagnostic_lines, tail(output, 80L)))
+  if (length(excerpt) > 120L) {
+    excerpt <- c(
+      head(excerpt, 120L),
+      sprintf("... additional failure output omitted from main log; see %s", log_path)
+    )
+  }
+  excerpt
+}
+
+.pipeline_log_child_summary <- function(step, output, status, logger = message) {
+  output <- as.character(output)
+  if (length(output) == 0) {
+    return(invisible(NULL))
+  }
+
+  log_path <- .pipeline_write_child_output(step, output)
+  logger(sprintf("[%s] Detailed step log saved to: %s", step, log_path))
+
+  if (status != 0L) {
+    log_lines <- .pipeline_failure_excerpt(output, log_path)
+  } else {
+    log_lines <- c(
+      .pipeline_success_summary(output),
+      .pipeline_warning_summary(output)
+    )
+  }
+
+  for (line in unique(log_lines)) {
+    logger(sprintf("[%s] %s", step, line))
+  }
+  invisible(log_path)
+}
+
+.pipeline_run_step <- function(step, script, config_path, logger = message) {
+  rscript <- file.path(R.home("bin"), if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
+  if (!file.exists(rscript)) rscript <- "Rscript"
+
+  script_path <- normalizePath(script, winslash = "/", mustWork = TRUE)
+  timeout <- .pipeline_step_timeout()
+  r_literal <- function(x) {
+    paste0("\"", gsub("\"", "\\\\\"", gsub("\\\\", "\\\\\\\\", as.character(x))), "\"")
+  }
+  wrapper_path <- tempfile(pattern = paste0("sae_step_", step, "_"), fileext = ".R")
+  writeLines(
+    c(
+      "options(warn = 1)",
+      sprintf("Sys.setenv(SAE_APP_CONFIG = %s, SAE_APP_STEP = %s)",
+              r_literal(config_path), r_literal(step)),
+      sprintf("source(%s, local = new.env(parent = globalenv()))",
+              r_literal(script_path))
+    ),
+    con = wrapper_path,
+    useBytes = TRUE
+  )
+  on.exit(unlink(wrapper_path, force = TRUE), add = TRUE)
+
+  output <- tryCatch(
+    suppressWarnings(system2(
+      command = rscript,
+      args = c("--vanilla", wrapper_path),
+      stdout = TRUE,
+      stderr = TRUE,
+      timeout = timeout
+    )),
+    error = function(e) {
+      out <- conditionMessage(e)
+      attr(out, "status") <- 1L
+      out
+    }
+  )
+
+  status <- attr(output, "status")
+  if (is.null(status)) status <- 0L
+  status <- as.integer(status)
+  child_log_path <- .pipeline_log_child_summary(step, output, status, logger = logger)
+
+  list(
+    status = status,
+    output = as.character(output),
+    child_log_path = child_log_path,
+    timed_out = identical(status, 124L)
+  )
+}
+
+.pipeline_clean_outputs <- function(logger = message) {
+  roots <- c("outputs/data", "outputs/tables", "outputs/figures", "outputs/logs")
+  for (root in roots) {
+    dir.create(root, recursive = TRUE, showWarnings = FALSE)
+    generated <- list.files(root, full.names = TRUE, recursive = FALSE,
+                            all.files = TRUE, no.. = TRUE)
+    generated <- generated[basename(generated) != ".gitkeep"]
+    if (length(generated) > 0) {
+      unlink(generated, recursive = TRUE, force = TRUE)
+    }
+  }
+  unlink(
+    c("outputs/final_report.html", "outputs/comparison_ai_note.html"),
+    force = TRUE
+  )
+  logger("Cleared previous generated outputs for this run.")
+}
+
 run_pipeline_from_config <- function(config_path, logger = message, progress_callback = NULL) {
   if (!requireNamespace("yaml", quietly = TRUE)) {
     stop("Package 'yaml' is required. Install with install.packages('yaml').")
@@ -555,6 +783,7 @@ run_pipeline_from_config <- function(config_path, logger = message, progress_cal
   for (d in out_dirs) {
     dir.create(d, recursive = TRUE, showWarnings = FALSE)
   }
+  .pipeline_clean_outputs(logger = logger)
 
   # Step-to-script mapping
   step_scripts <- c(
@@ -563,7 +792,8 @@ run_pipeline_from_config <- function(config_path, logger = message, progress_cal
     Comparison = "scripts/03_comparison.R"
   )
 
-  # Execute each pipeline step by source()-ing the corresponding R script
+  # Execute each pipeline step in a child R process so crashes and package-level
+  # aborts do not take down the Shiny process.
   for (step in steps) {
     script <- step_scripts[[step]]
     if (is.null(script) || !file.exists(script)) {
@@ -576,14 +806,30 @@ run_pipeline_from_config <- function(config_path, logger = message, progress_cal
 
     logger(sprintf("Running step: %s (%s)", step, script))
     step_unavailable <- FALSE
-    tryCatch(
-      source(script, local = new.env(parent = globalenv())),
-      sae_mfh_unavailable = function(e) {
-        step_unavailable <<- TRUE
-        logger(conditionMessage(e))
-        logger("MFH artifacts were written with unavailable/NA placeholders; continuing to Comparison.")
+    step_result <- .pipeline_run_step(step, script, config_path, logger = logger)
+    if (step_result$status != 0L) {
+      step_log_hint <- if (!is.null(step_result$child_log_path) &&
+                           nzchar(step_result$child_log_path %||% "")) {
+        sprintf(" Detailed step log: %s", step_result$child_log_path)
+      } else {
+        " See run.log for captured output."
       }
-    )
+      if (identical(step, "MFH") &&
+          any(grepl("MFH unavailable:", step_result$output, fixed = TRUE))) {
+        step_unavailable <- TRUE
+        logger("MFH artifacts were written with unavailable/NA placeholders; continuing to Comparison.")
+      } else if (isTRUE(step_result$timed_out)) {
+        stop(sprintf(
+          "Step '%s' exceeded the timeout (%s seconds).%s",
+          step, .pipeline_step_timeout(), step_log_hint
+        ))
+      } else {
+        stop(sprintf(
+          "Step '%s' failed with exit status %s.%s",
+          step, step_result$status, step_log_hint
+        ))
+      }
+    }
     logger(sprintf(
       "Completed step: %s%s",
       step,
@@ -608,9 +854,20 @@ run_pipeline_from_config <- function(config_path, logger = message, progress_cal
     if (!rmarkdown::pandoc_available()) {
       pandoc_candidates <- c(
         Sys.getenv("RSTUDIO_PANDOC"),
+        dirname(Sys.which("pandoc")),
+        dirname(Sys.which("quarto")),
         file.path(Sys.getenv("ProgramFiles"), "RStudio",
                   "resources", "app", "bin", "quarto", "bin", "tools"),
-        file.path(Sys.getenv("LOCALAPPDATA"), "Pandoc")
+        file.path(Sys.getenv("LOCALAPPDATA"), "Pandoc"),
+        "/Applications/RStudio.app/Contents/Resources/app/bin/quarto/bin/tools",
+        "/Applications/RStudio.app/Contents/Resources/app/quarto/bin/tools",
+        "/Applications/Quarto.app/Contents/Resources/app/bin/tools",
+        "/Applications/Quarto.app/Contents/Resources/app/quarto/bin/tools",
+        "/usr/lib/rstudio/resources/app/bin/quarto/bin/tools",
+        "/usr/lib/rstudio/resources/app/quarto/bin/tools",
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/bin"
       )
       for (p in pandoc_candidates) {
         if (nzchar(p) && (file.exists(file.path(p, "pandoc.exe")) ||

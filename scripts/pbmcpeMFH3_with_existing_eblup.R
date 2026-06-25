@@ -14,11 +14,12 @@ library(matrixcalc)
 
 pbmcpeMFH3_with_existing <- function(formula, vardir, domain_var,
                                      existing_model, nB = 100, data,
-                                     max_attempts = NULL, ...) {
+                                     max_attempts = NULL, seed = 123L, ...) {
   # max_attempts: hard cap on total bootstrap iterations to prevent the
   # loop from spinning forever when refits keep failing to converge (see
   # the corresponding pbmcpeMFH2 wrapper for the longer rationale).
   if (is.null(max_attempts)) max_attempts <- 5L * nB
+  if (!is.null(seed)) set.seed(seed)
 
   nD <- nrow(data)
   nT <- length(formula)

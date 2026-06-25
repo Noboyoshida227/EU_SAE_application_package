@@ -1937,8 +1937,8 @@ plot_real <- function(object,
       if (all(is.na(matcher))) {
         stop("Domains of map_tab and Map object do not match. Check map_tab")
       } else {
-        warnings(paste("Not all Domains of map_tab and Map object could be",
-                       "matched. Check map_tab"))
+        warning(paste("Not all Domains of map_tab and Map object could be",
+                      "matched. Check map_tab"), call. = FALSE)
       }
     }
     
@@ -1954,8 +1954,8 @@ plot_real <- function(object,
         stop(paste("Domain of emdi object and Map object do not match.",
                    "Try using map_tab"))
       } else {
-        warnings(paste("Not all Domains of emdi object and Map object",
-                       "could be matched. Try using map_tab"))
+        warning(paste("Not all Domains of emdi object and Map object",
+                      "could be matched. Try using map_tab"), call. = FALSE)
       }
     }
     map_data <- map_data[matcher, ]

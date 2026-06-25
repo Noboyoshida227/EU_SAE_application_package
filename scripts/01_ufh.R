@@ -132,6 +132,14 @@ ind_lab <- indicator_label(indicator_type, fgt_alpha,
 # pov_lab kept for backward-compat with downstream chunks that read it
 pov_lab <- ind_lab
 
+.safe_cv <- function(se, estimate, eps = 1e-12) {
+  ifelse(is.finite(se) & is.finite(estimate) & abs(estimate) > eps,
+         se / abs(estimate), NA_real_)
+}
+.safe_cv_from_mse <- function(mse, estimate, eps = 1e-12) {
+  .safe_cv(sqrt(pmax(mse, 0)), estimate, eps = eps)
+}
+
 if (identical(indicator_type, "poverty")) {
   cat("Indicator: Poverty --", ind_lab$fgt, "-", ind_lab$short, "\n")
   if (povline_type == "numeric") cat("Poverty line (numeric):", povline_cfg, "\n")
@@ -185,6 +193,13 @@ benchmark_level_var_cfg <- trimws(as.character(cfg_or_default(
   ufh_cfg$benchmark_level_variable,
   .app_cfg$benchmarking$level_variable %||% ""
 )))
+change_alpha <- suppressWarnings(as.numeric(cfg_or_default(
+  ufh_cfg$change_alpha,
+  .app_cfg$change_alpha %||% 0.05
+)))
+if (!is.finite(change_alpha) || change_alpha <= 0 || change_alpha >= 1) {
+  change_alpha <- 0.05
+}
 
 cat("UFH data paths:\n")
 cat("  survey:", survey_path, "\n")
@@ -658,6 +673,9 @@ if (do_benchmark) {
 } else {
   region_map <- NULL
   cat("UFH benchmarking disabled by configuration.\n")
+  if (nzchar(population_path %||% "")) {
+    cat("Population file was provided but UFH benchmarking is disabled; population file is not used in this step.\n")
+  }
 }
 
 # ---- Invalidate stale UFH output artifacts -------------------------------
@@ -755,7 +773,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
   direct_dt <- var_dt |>
     rename(direct_povrate = "pov_indicator", SD = "se") |>
     mutate(vardir = SD^2,
-           CV = SD / abs(direct_povrate)) |>
+           CV = .safe_cv(SD, direct_povrate)) |>
     merge(sampsize_dt, by = "domain")
 
   # When fitting on the log scale we additionally compute the population-
@@ -823,7 +841,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
         vardir_new = if_else(is.na(vardir) | vardir == 0, var_smooth, vardir),
         vardir     = vardir_new,
         SD         = sqrt(vardir_new),
-        CV         = SD / direct_povrate
+        CV         = .safe_cv(SD, direct_povrate)
       ) |>
       dplyr::select(-vardir_new)
     cat("  [year ", yr, "] arcsin transformation: variance smoothing ",
@@ -837,7 +855,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
           vardir_new = if_else(is.na(vardir) | vardir == 0, var_smooth, vardir),
           vardir     = vardir_new,
           SD         = sqrt(vardir_new),
-          CV         = SD / direct_povrate
+          CV         = .safe_cv(SD, direct_povrate)
         ) |>
         dplyr::select(-vardir_new),
       "sm_out" = direct_dt |>
@@ -846,14 +864,14 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
                                var_smooth, vardir),
           vardir     = vardir_new,
           SD         = sqrt(vardir_new),
-          CV         = SD / direct_povrate
+          CV         = .safe_cv(SD, direct_povrate)
         ) |>
         dplyr::select(-vardir_new),
       "sm_all" = direct_dt |>
         dplyr::mutate(
           vardir = var_smooth,
           SD     = sqrt(var_smooth),
-          CV     = SD / direct_povrate
+          CV     = .safe_cv(SD, direct_povrate)
         ),
       stop("Unknown var_choice '", var_choice,
            "' in run_fh_year (expected 'direct', 'sm_out', or 'sm_all').")
@@ -1072,7 +1090,7 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
         }
       }
       if (cv_col %in% names(pov_fh) && mse_col %in% names(pov_fh)) {
-        pov_fh[[cv_col]] <- sqrt(pmax(pov_fh[[mse_col]], 0)) / abs(pov_fh[[col]])
+        pov_fh[[cv_col]] <- .safe_cv_from_mse(pov_fh[[mse_col]], pov_fh[[col]])
       }
     }
     # ---- Re-benchmark on the EUR scale ---------------------------------
@@ -1122,8 +1140,8 @@ run_fh_year <- function(yr, survey_all, rhs_dt_raw, shp_dt,
           pov_fh$FH_Bench_MSE <- pov_fh$FH_Bench_MSE * ratio_sq
         }
         if ("FH_Bench_CV" %in% names(pov_fh) && "FH_Bench_MSE" %in% names(pov_fh)) {
-          pov_fh$FH_Bench_CV <- sqrt(pmax(pov_fh$FH_Bench_MSE, 0)) /
-                                 abs(pov_fh$FH_Bench)
+          pov_fh$FH_Bench_CV <- .safe_cv_from_mse(pov_fh$FH_Bench_MSE,
+                                                  pov_fh$FH_Bench)
         }
         attr(pov_fh, "bench_scale") <- "EUR"
       }
@@ -1539,6 +1557,13 @@ if (.use_eur_plots) {
     res_y1$fh_model
   }
   domain_ord <- match(shp_dt[["domain"]], .map_model_y1$ind$Domain)
+  if (any(is.na(domain_ord))) {
+    stop(
+      "UFH map year ", years_keep[1],
+      " cannot match all geometry domains to FH estimates. Unmatched geometry domains: ",
+      paste(head(shp_dt[["domain"]][is.na(domain_ord)], 10), collapse = ", ")
+    )
+  }
   map_tab <- data.frame(pop_data_id = .map_model_y1$ind$Domain[domain_ord],
                         shape_id = shp_dt[["domain"]])
   png(here::here("outputs", "figures", "ufh_map_y1.png"),
@@ -1807,6 +1832,13 @@ if (.use_eur_plots) {
     res_y2$fh_model
   }
   domain_ord <- match(shp_dt[["domain"]], .map_model_y2$ind$Domain)
+  if (any(is.na(domain_ord))) {
+    stop(
+      "UFH map year ", years_keep[2],
+      " cannot match all geometry domains to FH estimates. Unmatched geometry domains: ",
+      paste(head(shp_dt[["domain"]][is.na(domain_ord)], 10), collapse = ", ")
+    )
+  }
   map_tab <- data.frame(pop_data_id = .map_model_y2$ind$Domain[domain_ord],
                         shape_id = shp_dt[["domain"]])
   png(here::here("outputs", "figures", "ufh_map_y2.png"),
@@ -1949,14 +1981,16 @@ suppressWarnings({
               caption = "Merged Poverty Estimates (First 6 Domains)"))
 })
 
-
 results_unbench <- merged_data %>%
   mutate(
     diff = FH_y2 - FH_y1,
-    mse = FH_MSE_y1 + FH_MSE_y2,
+    FH_COV_y12 = if ("FH_COV_y12" %in% names(merged_data)) FH_COV_y12 else NA_real_,
+    covariance_used = is.finite(FH_COV_y12),
+    mse = FH_MSE_y1 + FH_MSE_y2 - 2 * ifelse(covariance_used, FH_COV_y12, 0),
+    mse = ifelse(is.finite(mse) & mse >= 0, mse, NA_real_),
     se = sqrt(mse),
     zq = diff / se,
-    alpha = 0.05,
+    alpha = change_alpha,
     z_critical = qnorm(1 - alpha / 2),
     lb = diff - z_critical * se,
     ub = diff + z_critical * se,
@@ -1964,7 +1998,7 @@ results_unbench <- merged_data %>%
     index = row_number()
   ) %>%
   select(
-    domain, diff, mse, alpha, zq, lb, ub, significant, index,
+    domain, diff, mse, covariance_used, alpha, zq, lb, ub, significant, index,
     FH_y1, FH_y2, Direct_y1, Direct_y2
   )
 
@@ -2003,17 +2037,20 @@ if (length(.bench_missing) > 0) {
       FH_Bench_y2 = NA_real_
     ) %>%
     select(
-      domain, diff, mse, alpha, zq, lb, ub, significant, index,
+      domain, diff, mse, covariance_used, alpha, zq, lb, ub, significant, index,
       FH_Bench_y1, FH_Bench_y2, Direct_y1, Direct_y2
     )
 } else {
   results <- merged_data %>%
     mutate(
       diff = FH_Bench_y2 - FH_Bench_y1,
-      mse = FH_Bench_MSE_y1 + FH_Bench_MSE_y2,
+      FH_Bench_COV_y12 = if ("FH_Bench_COV_y12" %in% names(merged_data)) FH_Bench_COV_y12 else NA_real_,
+      covariance_used = is.finite(FH_Bench_COV_y12),
+      mse = FH_Bench_MSE_y1 + FH_Bench_MSE_y2 - 2 * ifelse(covariance_used, FH_Bench_COV_y12, 0),
+      mse = ifelse(is.finite(mse) & mse >= 0, mse, NA_real_),
       se = sqrt(mse),
       zq = diff / se,
-      alpha = 0.05,
+      alpha = change_alpha,
       z_critical = qnorm(1 - alpha / 2),
       lb = diff - z_critical * se,
       ub = diff + z_critical * se,
@@ -2021,7 +2058,7 @@ if (length(.bench_missing) > 0) {
       index = row_number()
     ) %>%
     select(
-      domain, diff, mse, alpha, zq, lb, ub, significant, index,
+      domain, diff, mse, covariance_used, alpha, zq, lb, ub, significant, index,
       FH_Bench_y1, FH_Bench_y2, Direct_y1, Direct_y2
     )
 }
@@ -2240,29 +2277,45 @@ ggsave(here::here("outputs", "figures", "ufh_change_hist_bench.png"),
 
 
 longpov_dt <- pov_fh_combined |>
-  select(domain, year, modelpov = FH_Bench)
+  select(domain, year, modelpov = FH_Bench) |>
+  mutate(
+    domain = trimws(as.character(domain)),
+    year = as.numeric(year),
+    modelpov = as.numeric(modelpov)
+  )
 
-shp_dt$growth_rate <-
-  longpov_dt |>
-  group_split(domain) %>%
-  lapply(function(x) {
-    y <- lm(modelpov ~ year, data = x)
-    coef(y)[2] / mean(x$modelpov, na.rm = TRUE)
+growth_dt <- longpov_dt |>
+  group_by(domain) |>
+  group_modify(~ {
+    x <- .x[is.finite(.x$year) & is.finite(.x$modelpov), , drop = FALSE]
+    denom <- mean(x$modelpov, na.rm = TRUE)
+    growth <- if (nrow(x) >= 2 && is.finite(denom) && abs(denom) > 1e-12) {
+      unname(coef(lm(modelpov ~ year, data = x))[2] / denom)
+    } else {
+      NA_real_
+    }
+    tibble(growth_rate = growth)
   }) |>
-  unlist() |>
-  unname()
+  ungroup()
 
-
+shp_dt <- shp_dt |>
+  mutate(domain = trimws(as.character(domain))) |>
+  left_join(growth_dt, by = "domain")
 
 # Cap growth rates at 1 to reduce the influence of extreme outliers
 shp_dt <- shp_dt |>
   mutate(growth_rate_capped = pmin(growth_rate, 1))
 
+.growth_limit_min <- min(shp_dt$growth_rate_capped, na.rm = TRUE)
+if (!is.finite(.growth_limit_min)) .growth_limit_min <- 0
+.growth_limit_min <- min(.growth_limit_min, 0.5)
+if (.growth_limit_min >= 0.5) .growth_limit_min <- 0.5 - 1e-6
+
 .p_growth_ufh <- ggplot(shp_dt) +
   geom_sf(aes(fill = growth_rate_capped), color = NA) +
   scale_fill_viridis(
     name   = "Growth Rate (capped at 1)",
-    limits = c(min(shp_dt$growth_rate_capped, na.rm = TRUE), 0.5),
+    limits = c(.growth_limit_min, 0.5),
     oob    = squish,
     option = "magma"
   ) +

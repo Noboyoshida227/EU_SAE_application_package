@@ -9,6 +9,8 @@
 #'   \code{nT*(nT - 1)/2} covariances (in row-wise order).
 #' @param nB Number of bootstrap replications. Default is 100.
 #' @param data A data frame containing all variables used in \code{formula} and \code{vardir}.
+#' @param seed Optional random seed for reproducible bootstrap draws. Use NULL
+#'   to leave the caller's RNG state untouched.
 #'
 #' @return A list with the following components:
 #' \describe{
@@ -26,10 +28,12 @@ library(MASS)
 library(Matrix)
 library(matrixcalc)
 
-pbmcpeMFH2 <- function(formula, vardir, nB = 100, data, max_attempts = NULL, ...) {
+pbmcpeMFH2 <- function(formula, vardir, nB = 100, data, max_attempts = NULL,
+                       seed = 123L, ...) {
   # max_attempts: hard cap on total bootstrap iterations to prevent the
   # loop from spinning forever when refits keep failing to converge.
   if (is.null(max_attempts)) max_attempts <- 5L * nB
+  if (!is.null(seed)) set.seed(seed)
 
   nD <- nrow(data)
   nT <- length(formula)

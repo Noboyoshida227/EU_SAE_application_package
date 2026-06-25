@@ -254,6 +254,11 @@ ind_lab <- indicator_label(indicator_type, fgt_alpha,
                             currency_symbol = currency_symbol)
 pov_lab <- ind_lab    # back-compat alias for downstream chunks
 
+.safe_cv <- function(mse, estimate, eps = 1e-12) {
+  ifelse(is.finite(mse) & is.finite(estimate) & abs(estimate) > eps,
+         sqrt(pmax(mse, 0)) / abs(estimate), NA_real_)
+}
+
 if (identical(indicator_type, "poverty")) {
   cat("Indicator: Poverty --", ind_lab$fgt, "-", ind_lab$short, "\n")
   if (povline_type == "numeric") cat("Poverty line (numeric):", povline_cfg, "\n")
@@ -523,6 +528,7 @@ mfh_candidate_vars_y2 <- validate_mfh_covs(mfh_candidate_vars_y2, "Year 2")
 # this explicitly; missing values default to FALSE so old sample data are not
 # used accidentally.
 do_benchmark <- isTRUE(mfh_cfg$do_benchmark)
+population_path <- cfg_or_default(mfh_cfg$population_path, "")
 bench_nB <- as.integer(cfg_or_default(mfh_cfg$bench_nB, 200))
 
 # Model selection criterion: "AIC" (default) or "BIC"
@@ -557,6 +563,9 @@ if (do_benchmark) {
 } else {
   region_map <- NULL
   cat("MFH benchmarking disabled by configuration.\n")
+  if (nzchar(population_path %||% "")) {
+    cat("Population file was provided but MFH benchmarking is disabled; population file is not used in this step.\n")
+  }
 }
 
 # Source benchmarking functions for MFH
@@ -1015,15 +1024,70 @@ stopifnot(length(years_keep) == 2,
           length(se_cols)   == 2,
           length(N_cols)    == 2)
 
-# ---- Deduplicate RHS covariates (drop year, keep one row per domain) ----
-# Covariates are area-level auxiliary variables that do not carry a year suffix.
-# If the RHS data repeats identical rows for each year we simply deduplicate;
-# if values genuinely differ across years we average them so that a single
-# unsuffixed column is available for model selection.
+# ---- Build RHS covariates for MFH without averaging time-varying signals ----
+# Static covariates remain available under their original names. Covariates
+# that vary across the selected years are pivoted to year-specific columns
+# such as educ_2019 and educ_2020, so each MFH outcome can use the matching
+# year's auxiliary signal.
 rhs_cov_cols <- setdiff(names(rhs_dt), c("domain", "year"))
-rhs_dt_unique <- rhs_dt %>%
-  group_by(domain) %>%
-  summarize(across(all_of(rhs_cov_cols), ~ mean(.x, na.rm = TRUE)), .groups = "drop")
+rhs_dt_selected <- rhs_dt %>%
+  filter(as.integer(year) %in% years_keep)
+
+.first_nonmissing <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(x) == 0) NA else x[[1]]
+}
+.summarize_rhs_value <- function(x) {
+  if (is.numeric(x)) {
+    out <- mean(x, na.rm = TRUE)
+    if (is.nan(out)) NA_real_ else out
+  } else {
+    .first_nonmissing(x)
+  }
+}
+.rhs_varies_by_domain <- function(df, col) {
+  any(vapply(split(df[[col]], df$domain), function(x) {
+    x <- x[!is.na(x)]
+    length(unique(x)) > 1
+  }, logical(1)), na.rm = TRUE)
+}
+
+rhs_time_varying_cols <- rhs_cov_cols[
+  vapply(rhs_cov_cols, function(col) .rhs_varies_by_domain(rhs_dt_selected, col), logical(1))
+]
+rhs_static_cols <- setdiff(rhs_cov_cols, rhs_time_varying_cols)
+
+rhs_static <- if (length(rhs_static_cols) > 0) {
+  rhs_dt_selected %>%
+    group_by(domain) %>%
+    summarize(across(all_of(rhs_static_cols), .first_nonmissing), .groups = "drop")
+} else {
+  tibble(domain = unique(rhs_dt_selected$domain))
+}
+
+rhs_wide <- if (length(rhs_time_varying_cols) > 0) {
+  rhs_dt_selected %>%
+    select(domain, year, all_of(rhs_time_varying_cols)) %>%
+    group_by(domain, year) %>%
+    summarize(across(all_of(rhs_time_varying_cols), .summarize_rhs_value), .groups = "drop") %>%
+    tidyr::pivot_wider(
+      names_from = year,
+      values_from = all_of(rhs_time_varying_cols),
+      names_glue = "{.value}_{year}"
+    )
+} else {
+  tibble(domain = unique(rhs_dt_selected$domain))
+}
+
+rhs_dt_unique <- full_join(rhs_static, rhs_wide, by = "domain")
+if (length(rhs_time_varying_cols) > 0) {
+  cat(
+    "MFH auxiliary covariates treated as time-varying: ",
+    paste(rhs_time_varying_cols, collapse = ", "),
+    ". Year-specific columns were created for each selected year.\n",
+    sep = ""
+  )
+}
 
 # ---- Build the domain-level modeling frame ----
 domain_dt <- dir_est_domain_all_years %>%
@@ -1040,15 +1104,38 @@ candidate_vars_all <- setdiff(
   c("domain", poor_cols, "geometry")
 )
 
+shp_candidate_cols <- setdiff(names(shp_dt), c("domain", "geometry"))
+base_static_candidates <- intersect(
+  c(shp_candidate_cols, rhs_static_cols),
+  candidate_vars_all
+)
+.year_specific_rhs_candidates <- function(yr) {
+  intersect(paste0(rhs_time_varying_cols, "_", yr), candidate_vars_all)
+}
+.default_candidates_for_year <- function(yr) {
+  unique(c(base_static_candidates, .year_specific_rhs_candidates(yr)))
+}
+.resolve_user_candidates_for_year <- function(vars, yr) {
+  if (is.null(vars) || length(vars) == 0) return(character(0))
+  vars <- trimws(as.character(vars))
+  vars <- vars[nzchar(vars)]
+  resolved <- unlist(lapply(vars, function(v) {
+    v_year <- paste0(v, "_", yr)
+    if (v_year %in% candidate_vars_all) v_year else v
+  }), use.names = FALSE)
+  intersect(candidate_vars_all, unique(resolved))
+}
+
 # Per-year candidate vars: if user specified per-year lists, filter accordingly;
 # otherwise fall back to the full set of available candidates.
 candidate_vars_per_year <- setNames(
   lapply(seq_along(poor_cols), function(i) {
+    yr <- years_keep[i]
     yr_vars <- if (i == 1) mfh_candidate_vars_y1 else mfh_candidate_vars_y2
     if (!is.null(yr_vars) && length(yr_vars) > 0) {
-      intersect(candidate_vars_all, yr_vars)
+      .resolve_user_candidates_for_year(yr_vars, yr)
     } else {
-      candidate_vars_all
+      .default_candidates_for_year(yr)
     }
   }),
   poor_cols
@@ -1320,6 +1407,18 @@ if (.n_bad_rows > 0) {
 }
 
 .fit_skipped <- FALSE
+.mfh_fitted_domain_ids <- trimws(as.character(domain_dt$domain))
+if (any(is.na(.mfh_fitted_domain_ids) | !nzchar(.mfh_fitted_domain_ids))) {
+  stop("MFH modeling data contains missing or blank domain IDs after vardir filtering.")
+}
+if (anyDuplicated(.mfh_fitted_domain_ids)) {
+  stop(
+    "MFH modeling data contains duplicate domain IDs after vardir filtering: ",
+    paste(unique(.mfh_fitted_domain_ids[duplicated(.mfh_fitted_domain_ids)]), collapse = ", ")
+  )
+}
+domain_dt$domain <- .mfh_fitted_domain_ids
+rownames(domain_dt) <- .mfh_fitted_domain_ids
 
 model_ufh  <- eblupUFH(mfh_formula, vardir = vardir_cols, data = domain_dt, MAXITER = 100, PRECISION = 1e-04)
 model_mfh1 <- eblupMFH1(mfh_formula, vardir = vardir_cols, data = domain_dt, MAXITER = 100, PRECISION = 1e-04)
@@ -1500,26 +1599,87 @@ if (isTRUE(.model_fit_failed)) {
 rate_col     <- paste0("rate_", diag_model)
 mse_col_diag <- paste0("mse_", diag_model)
 
-domain_vec <- domain_dt$domain
+domain_vec <- trimws(as.character(domain_dt$domain))
+
+.mfh_output_domains <- function(output_df, model_name, fallback_domains, output_label) {
+  output_df <- as.data.frame(output_df)
+  fallback_domains <- trimws(as.character(fallback_domains))
+  n_out <- nrow(output_df)
+  rn <- rownames(output_df)
+  has_domain_rownames <- !is.null(rn) &&
+    length(rn) == n_out &&
+    !all(rn == as.character(seq_len(n_out)))
+
+  if (has_domain_rownames) {
+    rn <- trimws(as.character(rn))
+    if (any(is.na(rn) | !nzchar(rn))) {
+      stop(model_name, " ", output_label, " has missing or blank row names; cannot attach domains safely.")
+    }
+    if (!all(rn %in% fallback_domains)) {
+      bad <- setdiff(rn, fallback_domains)
+      stop(
+        model_name, " ", output_label,
+        " row names do not match the MFH modeling domains. Unmatched row names: ",
+        paste(head(bad, 10), collapse = ", ")
+      )
+    }
+    return(rn)
+  }
+
+  if (n_out != length(fallback_domains)) {
+    stop(
+      model_name, " ", output_label, " returned ", n_out,
+      " rows, but the MFH modeling data has ", length(fallback_domains),
+      " domains. This usually means the model dropped rows internally; ",
+      "domain labels cannot be attached safely."
+    )
+  }
+
+  fallback_domains
+}
+
+.mfh_align_direct_rows <- function(output_df, model_name, fallback_domains, output_label) {
+  output_domains <- .mfh_output_domains(output_df, model_name, fallback_domains, output_label)
+  direct_rows <- domain_dt %>%
+    mutate(.mfh_domain_key = trimws(as.character(domain))) %>%
+    filter(.mfh_domain_key %in% output_domains) %>%
+    arrange(match(.mfh_domain_key, output_domains))
+
+  if (!identical(direct_rows$.mfh_domain_key, output_domains)) {
+    missing_direct <- setdiff(output_domains, direct_rows$.mfh_domain_key)
+    stop(
+      model_name, " ", output_label,
+      " domains could not be matched back to the MFH direct estimates: ",
+      paste(head(missing_direct, 10), collapse = ", ")
+    )
+  }
+
+  direct_rows
+}
 
 # ---- 1) Helper: convert model outputs (EBLUP + MSE) to long ----
 make_long_model <- function(model_obj, model_name, domain_vec) {
 
   eb  <- as.data.frame(model_obj$eblup)
   mse <- as.data.frame(model_obj$MSE)
+  eb_domains <- .mfh_output_domains(eb, model_name, domain_vec, "EBLUP")
+  mse_domains <- .mfh_output_domains(mse, model_name, domain_vec, "MSE")
+  if (!identical(eb_domains, mse_domains)) {
+    stop(model_name, " EBLUP and MSE outputs have different domain ordering; cannot combine safely.")
+  }
 
   eb_long <- eb %>%
-    mutate(domain = domain_vec) %>%
+    mutate(domain = eb_domains) %>%
     pivot_longer(-domain, names_to = "year_raw", values_to = "rate")
 
   mse_long <- mse %>%
-    mutate(domain = domain_vec) %>%
+    mutate(domain = mse_domains) %>%
     pivot_longer(-domain, names_to = "year_raw", values_to = "mse")
 
   out <- left_join(eb_long, mse_long, by = c("domain", "year_raw")) %>%
     mutate(
       year  = as.integer(gsub("^.*?(\\d{4})$", "\\1", year_raw)),
-      cv    = if_else(rate > 0, sqrt(mse) / rate, NA_real_),
+      cv    = .safe_cv(mse, rate),
       model = model_name
     ) %>%
     select(domain, year, model, rate, mse, cv)
@@ -1560,7 +1720,7 @@ direct_long_mse <- dir_est_domain_all_years %>%
   mutate(year = as.integer(gsub("^.*?(\\d{4})$", "\\1", year_raw)))
 
 direct_long <- left_join(direct_long_rate, direct_long_mse, by = c("domain", "year")) %>%
-  mutate(direct_cv = if_else(direct_rate > 0, sqrt(direct_mse) / direct_rate, NA_real_)) %>%
+  mutate(direct_cv = .safe_cv(direct_mse, direct_rate)) %>%
   select(domain, year, direct_rate, direct_mse, direct_cv)
 
 # ---- 4) Combine model-based + direct into one comparison table ----
@@ -1884,7 +2044,6 @@ if (do_benchmark && !is.null(region_map)) {
 
   # Region and population size vectors aligned to domain_dt
   bench_region <- region_map$region[match(bench_domains, region_map$domain)]
-  population_path <- cfg_or_default(mfh_cfg$population_path, "")
   bench_Nd_mat <- sae_resolve_population_matrix(
     population_path = population_path,
     survey_data = survey_dt,
@@ -2012,7 +2171,7 @@ if (do_benchmark && !is.null(region_map)) {
       mse_Bench   = as.vector(bench_result$mse_bench)
     ) %>%
       mutate(
-        cv_Bench   = if_else(rate_Bench > 0, sqrt(mse_Bench) / rate_Bench, NA_real_),
+        cv_Bench   = .safe_cv(mse_Bench, rate_Bench),
         rmse_Bench = sqrt(mse_Bench)
       )
 
@@ -2102,8 +2261,8 @@ if (identical(indicator_type, "mean_welfare") && isTRUE(log_transform)) {
                        sub("^cv_", "rate_", cc))
     mse_match  <- sub("^cv_", "mse_", sub("^direct_cv$", "direct_mse", cc))
     if (all(c(rate_match, mse_match) %in% names(db_wide_all))) {
-      db_wide_all[[cc]] <- sqrt(pmax(db_wide_all[[mse_match]], 0)) /
-                          abs(db_wide_all[[rate_match]])
+      db_wide_all[[cc]] <- .safe_cv(db_wide_all[[mse_match]],
+                                    db_wide_all[[rate_match]])
     }
   }
   for (rc in rmse_cols) {
@@ -2126,8 +2285,8 @@ if (identical(indicator_type, "mean_welfare") && isTRUE(log_transform)) {
     )]
     db_wide_all$direct_mse <- ifelse(is.finite(aligned), aligned, db_wide_all$direct_mse)
     if ("direct_cv" %in% names(db_wide_all)) {
-      db_wide_all$direct_cv <- sqrt(pmax(db_wide_all$direct_mse, 0)) /
-                                abs(db_wide_all$direct_rate)
+      db_wide_all$direct_cv <- .safe_cv(db_wide_all$direct_mse,
+                                        db_wide_all$direct_rate)
     }
     if ("direct_rmse" %in% names(db_wide_all)) {
       db_wide_all$direct_rmse <- sqrt(pmax(db_wide_all$direct_mse, 0))
@@ -2220,8 +2379,8 @@ if (identical(indicator_type, "mean_welfare") && isTRUE(log_transform)) {
       db_wide_all$mse_Bench <- db_wide_all$mse_Bench * ratio_sq
     }
     if ("cv_Bench" %in% names(db_wide_all) && "mse_Bench" %in% names(db_wide_all)) {
-      db_wide_all$cv_Bench <- sqrt(pmax(db_wide_all$mse_Bench, 0)) /
-                               abs(db_wide_all$rate_Bench)
+      db_wide_all$cv_Bench <- .safe_cv(db_wide_all$mse_Bench,
+                                       db_wide_all$rate_Bench)
     }
     if ("rmse_Bench" %in% names(db_wide_all) && "mse_Bench" %in% names(db_wide_all)) {
       db_wide_all$rmse_Bench <- sqrt(pmax(db_wide_all$mse_Bench, 0))
@@ -2258,13 +2417,20 @@ stopifnot(length(poor_cols) == 2)
 # Ensure the same domain ordering used when mapping model outputs
 domain_vec <- domain_dt$domain
 
-# Extract EBLUP columns for the two outcomes (years_keep order)
+# Extract EBLUP columns for the two outcomes (years_keep order), aligned by
+# domain key so model-internal row drops cannot shift labels silently.
 eb <- as.data.frame(selected_model$eblup)
+eb_domains <- .mfh_output_domains(eb, diag_model, domain_vec, "EBLUP")
+direct_for_eb <- .mfh_align_direct_rows(eb, diag_model, domain_vec, "EBLUP")
+missing_in_eb <- setdiff(poor_cols, names(eb))
+if (length(missing_in_eb) > 0) {
+  stop("EBLUP output is missing expected columns: ", paste(missing_in_eb, collapse = ", "))
+}
 
 # Residuals: direct (domain_dt) minus EBLUP (model)
 resids_2 <- cbind(
-  domain_dt[[poor_cols[1]]] - eb[[poor_cols[1]]],
-  domain_dt[[poor_cols[2]]] - eb[[poor_cols[2]]]
+  direct_for_eb[[poor_cols[1]]] - eb[[poor_cols[1]]],
+  direct_for_eb[[poor_cols[2]]] - eb[[poor_cols[2]]]
 )
 
 # Two-panel diagnostic plots -- save to file
@@ -2316,10 +2482,11 @@ summary(lm_resid_fit_y2)
 
 stopifnot(length(poor_cols) == 2)
 
-# Residuals: direct minus EBLUP
+# Residuals: direct minus EBLUP, aligned by domain key.
 eb_diag <- as.data.frame(selected_model$eblup)
+direct_for_resid <- .mfh_align_direct_rows(eb_diag, diag_model, domain_vec, "EBLUP")
 
-resid_dt <- domain_dt %>%
+resid_dt <- direct_for_resid %>%
   select(all_of(poor_cols)) %>%
   as.data.frame()
 
@@ -2447,14 +2614,6 @@ re_shapiro_dt <- data.frame(
   labs(title = paste0("Random-effects histograms by year/outcome (", diag_model, ")"))
 ggsave(here::here("outputs", "figures", "mfh_qq_random_effect.png"),
        .p_re_hist, width = 10, height = 6, dpi = 150)
-
-
-
-re_shapiro_dt <- data.frame(
-  Time    = names(raneff_dt),
-  W       = NA_real_,
-  p_value = NA_real_
-)
 
 
 # ---- Export Shapiro--Wilk results to CSV for the app ----
@@ -2721,8 +2880,8 @@ if (.refvar_zero || .model_fit_failed) {
       existing_model = selected_model,
       nB             = 50,
       data           = domain_dt,
-      MAXITER        = 1e10,
-      PRECISION      = 1e-2
+      MAXITER        = 100,
+      PRECISION      = 1e-04
     ),
     error = function(e) {
       cat(
@@ -3258,41 +3417,49 @@ for (i in seq_along(plots)) {
 # Extract poverty rates from the selected model
 longpov_dt <-
   db_wide_all |>
-  select(domain, year, modelpov = all_of(rate_col))
+  select(domain, year, modelpov = all_of(rate_col)) |>
+  mutate(
+    domain = trimws(as.character(domain)),
+    year = as.numeric(year),
+    modelpov = as.numeric(modelpov)
+  )
 
 ### lets perform a regression for each area of poverty rates against year 
 ### and then we divide the slope variable by the average poverty rate
 
-shp_dt$growth_rate <- 
+growth_dt <-
   longpov_dt |>
-  group_split(domain) %>%
-  lapply(X = .,
-         FUN = function(x){
-           
-           y <- lm(modelpov ~ year, data = x)  # Simplified formula
-           
-           y <- coef(y)[2]
-           
-           delta <- y / (mean(x$modelpov, na.rm = TRUE))
-           
-           return(delta)
-           
-         }) |>
-  unlist() |>
-  unname()
+  group_by(domain) |>
+  group_modify(~ {
+    x <- .x[is.finite(.x$year) & is.finite(.x$modelpov), , drop = FALSE]
+    denom <- mean(x$modelpov, na.rm = TRUE)
+    growth <- if (nrow(x) >= 2 && is.finite(denom) && abs(denom) > 1e-12) {
+      unname(coef(lm(modelpov ~ year, data = x))[2] / denom)
+    } else {
+      NA_real_
+    }
+    tibble(growth_rate = growth)
+  }) |>
+  ungroup()
 
-
-
+shp_dt <- shp_dt |>
+  mutate(domain = trimws(as.character(domain))) |>
+  left_join(growth_dt, by = "domain")
 
 # Cap growth rates at 1 to reduce the influence of extreme outliers
 shp_dt <- shp_dt |>
   mutate(growth_rate_capped = pmin(growth_rate, 1))
 
+.growth_limit_min <- min(shp_dt$growth_rate_capped, na.rm = TRUE)
+if (!is.finite(.growth_limit_min)) .growth_limit_min <- 0
+.growth_limit_min <- min(.growth_limit_min, 0.5)
+if (.growth_limit_min >= 0.5) .growth_limit_min <- 0.5 - 1e-6
+
 p_growth <- ggplot(shp_dt) +
   geom_sf(aes(fill = growth_rate_capped), color = NA) +
   scale_fill_viridis(
     name   = "Growth Rate (capped at 1)",
-    limits = c(min(shp_dt$growth_rate_capped, na.rm = TRUE), 0.5),
+    limits = c(.growth_limit_min, 0.5),
     oob    = squish,
     option = "magma"
   ) +
@@ -3490,10 +3657,19 @@ if (identical(indicator_type, "mean_welfare") && isTRUE(log_transform) &&
     }
     if (all(c("lb", "ub") %in% names(comparison_final))) {
       se <- sqrt(comparison_final$mse)
-      comparison_final$lb <- comparison_final$diff - 1.96 * se
-      comparison_final$ub <- comparison_final$diff + 1.96 * se
-      comparison_final$significant <- with(comparison_final,
-                                           sign(lb) == sign(ub) & lb != 0)
+      alpha_vec <- if ("alpha" %in% names(comparison_final)) {
+        suppressWarnings(as.numeric(comparison_final$alpha))
+      } else {
+        rep(0.05, nrow(comparison_final))
+      }
+      alpha_vec[!is.finite(alpha_vec) | alpha_vec <= 0 | alpha_vec >= 1] <- 0.05
+      zq_vec <- qnorm(alpha_vec / 2, lower.tail = FALSE)
+      comparison_final$lb <- comparison_final$diff - zq_vec * se
+      comparison_final$ub <- comparison_final$diff + zq_vec * se
+      comparison_final$significant <- ifelse(
+        comparison_final$lb > 0 | comparison_final$ub < 0,
+        "Significant", "Not Significant"
+      )
     }
     attr(comparison_final, "log_back_transformed") <- TRUE
   }
@@ -3512,7 +3688,7 @@ write.csv(
 # this step, comparison_final_bench.csv stays on the log scale while
 # comparison_final.csv is in EUR -- leading to a spurious "MFH Benchmarked
 # has many significant changes" pattern in the Comparison report
-# because tiny log-scale `diff` values clear the |diff| > 1.96Â·sqrt(mse)
+# because tiny log-scale `diff` values can clear the change-significance
 # threshold while large EUR-scale `diff` values do not.
 if (exists("comp12_bench_obj") && !is.null(comp12_bench_obj) &&
     identical(indicator_type, "mean_welfare") && isTRUE(log_transform) &&

@@ -163,6 +163,65 @@ diag_model <- if (!is.null(mfh_artifacts$diag_model)) mfh_artifacts$diag_model e
   trimws(as.character(x))
 }
 
+.cmp_format_keys <- function(df, keys, n = 8) {
+  if (nrow(df) == 0) return("(none)")
+  key_df <- df[seq_len(min(nrow(df), n)), keys, drop = FALSE]
+  apply(key_df, 1, function(row) paste(row, collapse = " / "))
+}
+
+.cmp_assert_unique_keys <- function(df, keys, label) {
+  dup <- df %>%
+    count(across(all_of(keys)), name = ".n") %>%
+    filter(.n > 1)
+  if (nrow(dup) > 0) {
+    stop(
+      label, " has duplicate keys for ", paste(keys, collapse = ", "), ". Examples: ",
+      paste(.cmp_format_keys(dup, keys), collapse = "; ")
+    )
+  }
+}
+
+.cmp_assert_matching_keys <- function(left, right, keys, left_label, right_label) {
+  .cmp_assert_unique_keys(left, keys, left_label)
+  .cmp_assert_unique_keys(right, keys, right_label)
+
+  missing_right <- anti_join(left, right, by = keys)
+  missing_left <- anti_join(right, left, by = keys)
+  if (nrow(missing_right) > 0 || nrow(missing_left) > 0) {
+    details <- c()
+    if (nrow(missing_right) > 0) {
+      details <- c(
+        details,
+        paste0(
+          nrow(missing_right), " ", left_label, " key(s) have no match in ", right_label,
+          ". Examples: ", paste(.cmp_format_keys(missing_right, keys), collapse = "; ")
+        )
+      )
+    }
+    if (nrow(missing_left) > 0) {
+      details <- c(
+        details,
+        paste0(
+          nrow(missing_left), " ", right_label, " key(s) have no match in ", left_label,
+          ". Examples: ", paste(.cmp_format_keys(missing_left, keys), collapse = "; ")
+        )
+      )
+    }
+    stop(
+      "Comparison cannot join FH and MFH outputs safely by ",
+      paste(keys, collapse = ", "), ". ",
+      paste(details, collapse = " ")
+    )
+  }
+}
+
+.cmp_require_cols <- function(df, cols, label) {
+  missing <- setdiff(cols, names(df))
+  if (length(missing) > 0) {
+    stop(label, " is missing required column(s): ", paste(missing, collapse = ", "))
+  }
+}
+
 .cmp_first_nonempty <- function(...) {
   vals <- list(...)
   for (x in vals) {
@@ -256,6 +315,34 @@ pov_mfh <- read_excel(here::here("outputs", "data", "pov_mfh.xlsx")) %>%
     year = as.integer(year)
   )
 
+.cmp_require_cols(
+  pov_fh,
+  c("domain", "year", "FH", "FH_MSE", "FH_CV"),
+  "UFH output (pov_fh.xlsx)"
+)
+.cmp_require_cols(
+  pov_mfh,
+  c("domain", "year", "direct_rate", "direct_mse", "direct_cv",
+    .mfh_rate_col, .mfh_mse_col, .mfh_cv_col),
+  "MFH output (pov_mfh.xlsx)"
+)
+if (.benchmark_enabled) {
+  .cmp_require_cols(
+    pov_fh,
+    c("FH_Bench", "FH_Bench_MSE", "FH_Bench_CV"),
+    "UFH benchmark output (pov_fh.xlsx)"
+  )
+  .cmp_require_cols(
+    pov_mfh,
+    c("rate_Bench", "mse_Bench", "cv_Bench"),
+    "MFH benchmark output (pov_mfh.xlsx)"
+  )
+} else {
+  pov_fh$FH_Bench <- pov_fh$FH
+  pov_fh$FH_Bench_MSE <- pov_fh$FH_MSE
+  pov_fh$FH_Bench_CV <- pov_fh$FH_CV
+}
+
 # ---- Diagnostic: summarise the FH/MFH series we're about to plot. If these
 # numbers don't change from one pipeline run to the next, the figures won't
 # change either, even if the transformation toggle moved.
@@ -331,7 +418,7 @@ sig_mfh_bench <- .read_change_csv(here::here("outputs", "tables", "comparison_fi
   "diff" %in% names(sig_mfh) &&
   any(is.finite(suppressWarnings(as.numeric(sig_mfh$diff))))
 
-comparison_dt <- pov_mfh %>%
+.mfh_comp <- pov_mfh %>%
   transmute(
     domain,
     year,
@@ -341,22 +428,46 @@ comparison_dt <- pov_mfh %>%
     MFH     = .data[[.mfh_rate_col]],
     MFH_MSE = .data[[.mfh_mse_col]],
     MFH_CV  = .data[[.mfh_cv_col]],
-    MFH_Bench     = if ("rate_Bench" %in% names(pov_mfh)) rate_Bench else .data[[.mfh_rate_col]],
-    MFH_Bench_MSE = if ("mse_Bench"  %in% names(pov_mfh)) mse_Bench  else .data[[.mfh_mse_col]],
-    MFH_Bench_CV  = if ("cv_Bench"   %in% names(pov_mfh)) cv_Bench   else .data[[.mfh_cv_col]]
-  ) %>%
+    MFH_Bench = if (.benchmark_enabled) {
+      rate_Bench
+    } else {
+      .data[[.mfh_rate_col]]
+    },
+    MFH_Bench_MSE = if (.benchmark_enabled) {
+      mse_Bench
+    } else {
+      .data[[.mfh_mse_col]]
+    },
+    MFH_Bench_CV = if (.benchmark_enabled) {
+      cv_Bench
+    } else {
+      .data[[.mfh_cv_col]]
+    }
+  )
+
+.fh_comp <- pov_fh %>%
+  transmute(
+    domain,
+    year,
+    FH = FH,
+    FH_MSE = FH_MSE,
+    FH_CV = FH_CV,
+    FH_Bench = FH_Bench,
+    FH_Bench_MSE = FH_Bench_MSE,
+    FH_Bench_CV = FH_Bench_CV
+  )
+
+.cmp_assert_matching_keys(
+  .mfh_comp,
+  .fh_comp,
+  c("domain", "year"),
+  "MFH output (pov_mfh.xlsx)",
+  "UFH output (pov_fh.xlsx)"
+)
+
+comparison_dt <- .mfh_comp %>%
   left_join(
-    pov_fh %>%
-      transmute(
-        domain,
-        year,
-        FH = FH,
-        FH_MSE = FH_MSE,
-        FH_CV = FH_CV,
-        FH_Bench = FH_Bench,
-        FH_Bench_MSE = FH_Bench_MSE,
-        FH_Bench_CV = FH_Bench_CV
-      ),
+    .fh_comp,
     by = c("domain", "year")
   ) %>%
   mutate(
@@ -625,12 +736,12 @@ if (.mfh_not_executed) {
 } else {
   .summary_sig_inputs <- list(
     prepare_sig_tbl(sig_fh, "FH"),
-    prepare_sig_tbl(sig_mfh, "MFH", signif_true = c("Significant"))
+    prepare_sig_tbl(sig_mfh, "MFH")
   )
   if (.benchmark_enabled) {
     .summary_sig_inputs <- c(.summary_sig_inputs, list(
       prepare_sig_tbl(sig_fh_bench, "FH Benchmarked"),
-      prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
+      prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked")
     ))
   }
   sig_summary_tbl <- bind_rows(.summary_sig_inputs) %>%
@@ -1091,12 +1202,12 @@ if (.mfh_not_executed) {
 } else {
   .sig_inputs <- list(
     prepare_sig_tbl(sig_fh, "FH"),
-    prepare_sig_tbl(sig_mfh, "MFH", signif_true = c("Significant"))
+    prepare_sig_tbl(sig_mfh, "MFH")
   )
   if (.benchmark_enabled) {
     .sig_inputs <- c(.sig_inputs, list(
       prepare_sig_tbl(sig_fh_bench, "FH Benchmarked"),
-      prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked", signif_true = c("Significant"))
+      prepare_sig_tbl(sig_mfh_bench, "MFH Benchmarked")
     ))
   }
   sig_plot_dt <- bind_rows(.sig_inputs) %>%
