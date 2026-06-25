@@ -139,16 +139,30 @@ validate_inputs <- function(survey_data, aux_data) {
 
   # --- Auxiliary data checks ---
   if (!is.null(aux_data) && nrow(aux_data) > 0) {
-    summary$n_aux_vars <- ncol(aux_data) - 1  # exclude domain column
+    summary$n_aux_vars <- length(setdiff(names(aux_data), c("domain", "year")))
 
     # Zero-variance columns
     numeric_cols <- names(aux_data)[vapply(aux_data, is.numeric, logical(1))]
-    numeric_cols <- setdiff(numeric_cols, "domain")
+    numeric_cols <- setdiff(numeric_cols, c("domain", "year"))
     zero_var <- character()
+    all_missing_or_nonfinite <- character()
     for (col in numeric_cols) {
-      if (sd(aux_data[[col]], na.rm = TRUE) == 0) {
+      vals <- suppressWarnings(as.numeric(aux_data[[col]]))
+      vals <- vals[is.finite(vals)]
+      if (length(vals) == 0) {
+        all_missing_or_nonfinite <- c(all_missing_or_nonfinite, col)
+        next
+      }
+      if (length(unique(vals)) <= 1) {
         zero_var <- c(zero_var, col)
       }
+    }
+    if (length(all_missing_or_nonfinite) > 0) {
+      flags <- c(flags, sprintf(
+        "WARNING: Auxiliary column(s) have no finite numeric values: %s",
+        paste(all_missing_or_nonfinite, collapse = ", ")
+      ))
+      summary$all_missing_aux_cols <- all_missing_or_nonfinite
     }
     if (length(zero_var) > 0) {
       flags <- c(flags, sprintf("WARNING: Zero-variance column(s) in auxiliary data: %s",

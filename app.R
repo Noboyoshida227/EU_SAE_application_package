@@ -107,7 +107,7 @@ data_dir_path <- function() {
 # by the user in the dashboard and can vary across countries.
 if (!dir.exists(data_dir_path())) {
   warning(sprintf(
-    "Data folder not found: %s\nCreate this subfolder and place the survey, auxiliary covariates, and shapefiles/geometries .rds files there before choosing them in the dashboard.",
+    "Optional package data folder not found: %s\nYou can still use Browse in the dashboard to choose survey, auxiliary covariates, and shapefiles/geometries .rds files from another folder on your computer.",
     data_dir_path()
   ), immediate. = TRUE)
 }
@@ -151,6 +151,10 @@ missing_data_inputs <- function(survey_path, rhs_path, shp_path) {
 
 dashboard_setup_path <- function() {
   file.path("app_runs", "_last_dashboard_setup.yml")
+}
+
+dashboard_setup_file_dir <- function() {
+  file.path("app_runs", "_last_setup_files")
 }
 
 dashboard_setup_defaults <- function() {
@@ -227,6 +231,9 @@ setup_file_path <- function(file_name) {
   file_name <- trimws(as.character(file_name %||% ""))
   if (!nzchar(file_name)) {
     return(NULL)
+  }
+  if (file.exists(file_name) || grepl("(^[A-Za-z]:[\\\\/])|^/|[\\\\/]", file_name)) {
+    return(normalizePath(file_name, winslash = "/", mustWork = FALSE))
   }
   normalizePath(file.path(data_dir_path(), basename(file_name)),
                 winslash = "/", mustWork = FALSE)
@@ -549,6 +556,25 @@ tip_label <- function(label_text, tip_text) {
   )
 }
 
+mapping_selectize <- function(input_id, label, selected = "",
+                              placeholder = "Search or type column name") {
+  selected <- selected %||% ""
+  selectizeInput(
+    input_id,
+    label,
+    choices = unique(c("", selected)),
+    selected = selected,
+    multiple = FALSE,
+    options = list(
+      create = TRUE,
+      createOnBlur = TRUE,
+      persist = FALSE,
+      placeholder = placeholder,
+      maxOptions = 1000
+    )
+  )
+}
+
 ui <- fluidPage(
   # ---- Cover Page ----
   tags$head(
@@ -566,6 +592,17 @@ ui <- fluidPage(
           show.style.transition = 'opacity 0.45s ease';
           setTimeout(function(){ show.style.opacity = '1'; }, 30);
         }, 450);
+      });
+      Shiny.addCustomMessageHandler('mappingValidity', function(msg) {
+        var group = $('#' + msg.id).closest('.form-group');
+        if (!group.length) return;
+        if (msg.invalid) {
+          group.addClass('mapping-invalid');
+          group.attr('title', msg.message || 'Column not found in selected dataset');
+        } else {
+          group.removeClass('mapping-invalid');
+          group.removeAttr('title');
+        }
       });
     ")),
     tags$style(HTML("
@@ -693,6 +730,26 @@ ui <- fluidPage(
     .tt-wrap:hover .tt-text {
       visibility: visible;
       opacity: 1;
+    }
+    .form-group.mapping-invalid label {
+      color: #b00020;
+    }
+    .form-group.mapping-invalid .selectize-input {
+      border-color: #b00020 !important;
+      box-shadow: 0 0 0 2px rgba(176,0,32,0.12) !important;
+    }
+    .form-group.mapping-invalid .selectize-input.focus {
+      border-color: #b00020 !important;
+      box-shadow: 0 0 0 3px rgba(176,0,32,0.18) !important;
+    }
+    .mapping-validation-summary {
+      color: #8a1f11;
+      background: #fff3f1;
+      border: 1px solid #f1b8b0;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      margin: 4px 0 12px 0;
     }
 
     /* ---- Guide Page ---- */
@@ -1016,7 +1073,7 @@ ui <- fluidPage(
       h4("Saved setup"),
       tags$div(
         style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
-        "Save or reload dashboard settings so later runs only require small edits. Saved data selections use file names in the package data/ subfolder and are shown as active files below."
+        "Save or reload dashboard settings so later runs only require small edits. If files were selected with Browse, the app saves local setup copies under app_runs/_last_setup_files for the next session."
       ),
       div(
         style = "display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px;",
@@ -1031,18 +1088,18 @@ ui <- fluidPage(
       h4("Data inputs"),
       tags$div(
         style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
-        "Before running the app, users must place the required .rds datasets in the package data/ subfolder. Use Browse to select the survey, auxiliary, and shapefile datasets from data/. If a saved setup is loaded, its active files are shown below each Browse button."
+        "Use Browse to select the required .rds datasets from any folder on your computer: household survey, auxiliary covariates, and shapefiles/geometries. If a saved setup is loaded, its active files are shown below each Browse button; browse again only when changing a file."
       ),
       fileInput("survey_file",
-        tip_label("Browse Survey data file in data/", "Choose the household survey .rds file from the package data/ subfolder. If a saved setup is loaded, this Browse button is only needed when changing the survey file."),
+        tip_label("Browse Survey data file (.rds)", "Choose the household survey .rds file from any folder on your computer. If a saved setup is loaded, this Browse button is only needed when changing the survey file."),
         accept = ".rds"),
       uiOutput("survey_active_file"),
       fileInput("rhs_file",
-        tip_label("Browse Auxiliary data file in data/", "Choose the auxiliary covariates .rds file from the package data/ subfolder. If a saved setup is loaded, this Browse button is only needed when changing the auxiliary file."),
+        tip_label("Browse Auxiliary data file (.rds)", "Choose the auxiliary covariates .rds file from any folder on your computer. If a saved setup is loaded, this Browse button is only needed when changing the auxiliary file."),
         accept = ".rds"),
       uiOutput("rhs_active_file"),
       fileInput("shp_file",
-        tip_label("Browse Shapefile in data/", "Choose the shapefiles/geometries .rds file from the package data/ subfolder. If a saved setup is loaded, this Browse button is only needed when changing the shapefile."),
+        tip_label("Browse Shapefile/geometries file (.rds)", "Choose the shapefiles/geometries .rds file from any folder on your computer. If a saved setup is loaded, this Browse button is only needed when changing the shapefile."),
         accept = ".rds"),
       uiOutput("shp_active_file"),
       checkboxInput("do_benchmark",
@@ -1054,9 +1111,9 @@ ui <- fluidPage(
           tip_label("Benchmark Target Database (optional)",
                     "Optional RDS/CSV/XLSX file with benchmark targets by year. Leave blank to estimate targets from the survey using population_weight = weight * household size.")),
         uiOutput("benchmark_active_file"),
-        textInput("var_benchmark_level",
+        mapping_selectize("var_benchmark_level",
           tip_label("Benchmark level",
-                    "Optional survey column for grouped benchmarking, such as region, NUTS2, or voivodeship. Leave blank for national benchmarking."),
+                    "Optional survey column for grouped benchmarking, such as region, NUTS2, or voivodeship. Search the survey columns or type the column name. Leave blank for national benchmarking."),
           "")
       ),
       fileInput("population_file",
@@ -1067,26 +1124,31 @@ ui <- fluidPage(
 
       # ---- Variable mapping ----
       h4("Variable mapping"),
-      textInput("var_year",
-        tip_label("year", "Column name in the survey data that identifies the year."),
+      tags$div(
+        style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
+        "Search the dropdown list of columns loaded from the selected dataset, or type a column name directly. A red field means the typed name is not currently found in the relevant dataset."
+      ),
+      uiOutput("mapping_validation_summary"),
+      mapping_selectize("var_year",
+        tip_label("year", "Column name in the survey data that identifies the year. Search the survey columns or type the column name."),
         "year"),
-      textInput("var_domain",
-        tip_label("domain", "Column name in the survey data that identifies the small area domain (e.g. NUTS-3 province)."),
+      mapping_selectize("var_domain",
+        tip_label("domain", "Column name in the survey data that identifies the small area domain (e.g. NUTS-3 province). Search the survey columns or type the column name."),
         "prov"),
-      textInput("var_psu",
-        tip_label("psu", "Column name for the Primary Sampling Unit. Used to compute design-based sampling variances."),
+      mapping_selectize("var_psu",
+        tip_label("psu", "Column name for the Primary Sampling Unit. Used to compute design-based sampling variances. Search the survey columns or type the column name."),
         "ea_id"),
-      textInput("var_weight",
-        tip_label("weight", "Column name for the survey sampling weight."),
+      mapping_selectize("var_weight",
+        tip_label("weight", "Column name for the survey sampling weight. Search the survey columns or type the column name."),
         "weight"),
-      textInput("var_strata",
-        tip_label("strata", "Optional strata ID column for survey-design variance estimation. Leave blank if the survey design has no strata or strata are unavailable."),
+      mapping_selectize("var_strata",
+        tip_label("strata", "Optional strata ID column for survey-design variance estimation. Search the survey columns or type the column name. Leave blank if the survey design has no strata or strata are unavailable."),
         ""),
-      textInput("var_hh_size",
-        tip_label("household size", "Column name for household size. Direct poverty-rate estimates use population_weight = weight * household size; when no population file is uploaded, benchmarking also estimates domain populations as sum(weight * household size) by domain and year."),
+      mapping_selectize("var_hh_size",
+        tip_label("household size", "Column name for household size. Direct poverty-rate estimates use population_weight = weight * household size; when no population file is uploaded, benchmarking also estimates domain populations as sum(weight * household size) by domain and year. Search the survey columns or type the column name."),
         "hhsize"),
-      textInput("var_welfare",
-        tip_label("welfare", "Column name for the welfare variable (e.g. income or consumption) used to determine poverty status."),
+      mapping_selectize("var_welfare",
+        tip_label("welfare", "Column name for the welfare variable (e.g. income or consumption) used to determine poverty status. Search the survey columns or type the column name."),
         "income"),
 
       # ---- Indicator type ----
@@ -1110,8 +1172,8 @@ ui <- fluidPage(
           selected = "column", inline = TRUE),
         conditionalPanel(
           condition = "input.povline_type == 'column' && input.indicator_type == 'poverty'",
-          textInput("var_povline",
-            tip_label("povline", "Column name for the poverty line."),
+          mapping_selectize("var_povline",
+            tip_label("povline", "Column name for the poverty line. Search the survey columns or type the column name."),
             "povline")
         ),
         conditionalPanel(
@@ -1146,11 +1208,11 @@ ui <- fluidPage(
           value = "EUR")
       ),
 
-      textInput("rhs_domain",
-        tip_label("Auxiliary covariates domain field", "Column name in the auxiliary covariates file that identifies the domain. Used to join covariates to survey data."),
+      mapping_selectize("rhs_domain",
+        tip_label("Auxiliary covariates domain field", "Column name in the auxiliary covariates file that identifies the domain. Search the auxiliary columns or type the column name. Used to join covariates to survey data."),
         "prov"),
-      textInput("shp_domain",
-        tip_label("Shapefile domain field", "Column name in the shapefiles file that identifies the domain. Used to join estimates to map polygons."),
+      mapping_selectize("shp_domain",
+        tip_label("Shapefile domain field", "Column name in the shapefiles/geometries file that identifies the domain. Search the geometry columns or type the column name. Used to join estimates to map polygons."),
         "prov"),
       tags$hr(),
 
@@ -1484,34 +1546,63 @@ server <- function(input, output, session) {
     lines
   }
 
+  safe_setup_copy_name <- function(key, file_name) {
+    base <- basename(file_name %||% "")
+    if (!nzchar(base)) {
+      base <- paste0(key, ".rds")
+    }
+    base <- gsub("[^A-Za-z0-9._-]+", "_", base)
+    paste(key, base, sep = "__")
+  }
+
+  persist_setup_upload <- function(key, file_input) {
+    if (is.null(file_input) ||
+        is.null(file_input$datapath) ||
+        !nzchar(file_input$datapath %||% "") ||
+        !file.exists(file_input$datapath)) {
+      return(NULL)
+    }
+    dir.create(dashboard_setup_file_dir(), recursive = TRUE, showWarnings = FALSE)
+    target <- file.path(
+      dashboard_setup_file_dir(),
+      safe_setup_copy_name(key, file_input$name %||% key)
+    )
+    ok <- file.copy(file_input$datapath, target, overwrite = TRUE)
+    if (!isTRUE(ok)) {
+      stop(sprintf("Could not save setup copy for %s.", key), call. = FALSE)
+    }
+    normalizePath(target, winslash = "/", mustWork = FALSE)
+  }
+
+  selected_setup_file_ref <- function(file_input, key) {
+    copied <- persist_setup_upload(key, file_input)
+    if (!is.null(copied) && nzchar(copied)) {
+      return(copied)
+    }
+    setup_file_ref_for(key)
+  }
+
   selected_setup_file_name <- function(file_input, key) {
     upload_name <- file_input$name %||% ""
     if (nzchar(upload_name)) {
       return(basename(upload_name))
     }
-    file_name <- setup_file_name_for(key)
-    if (nzchar(file_name)) file_name else ""
+    file_ref <- setup_file_ref_for(key)
+    if (nzchar(file_ref)) basename(file_ref) else ""
   }
 
-  setup_file_input_id <- function(key) {
-    switch(
-      key,
-      NULL
-    )
-  }
-
-  setup_file_name_for <- function(key) {
-    input_id <- setup_file_input_id(key)
-    typed_name <- if (!is.null(input_id)) trimws(input[[input_id]] %||% "") else ""
-    if (nzchar(typed_name)) {
-      return(basename(typed_name))
-    }
+  setup_file_ref_for <- function(key) {
     active_setup_files()[[key]] %||% ""
   }
 
+  setup_file_name_for <- function(key) {
+    file_ref <- setup_file_ref_for(key)
+    if (nzchar(file_ref)) basename(file_ref) else ""
+  }
+
   saved_setup_path_for <- function(key) {
-    file_name <- setup_file_name_for(key)
-    path <- setup_file_path(file_name)
+    file_ref <- setup_file_ref_for(key)
+    path <- setup_file_path(file_ref)
     if (!is.null(path) && file.exists(path)) path else NULL
   }
 
@@ -1535,11 +1626,11 @@ server <- function(input, output, session) {
       version = 1L,
       saved_at = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
       data_files = list(
-        survey_file = selected_setup_file_name(input$survey_file, "survey_file"),
-        rhs_file = selected_setup_file_name(input$rhs_file, "rhs_file"),
-        shp_file = selected_setup_file_name(input$shp_file, "shp_file"),
-        regional_benchmark_file = selected_setup_file_name(input$regional_benchmark_file, "regional_benchmark_file"),
-        population_file = selected_setup_file_name(input$population_file, "population_file")
+        survey_file = selected_setup_file_ref(input$survey_file, "survey_file"),
+        rhs_file = selected_setup_file_ref(input$rhs_file, "rhs_file"),
+        shp_file = selected_setup_file_ref(input$shp_file, "shp_file"),
+        regional_benchmark_file = selected_setup_file_ref(input$regional_benchmark_file, "regional_benchmark_file"),
+        population_file = selected_setup_file_ref(input$population_file, "population_file")
       ),
       inputs = inputs
     )
@@ -1569,6 +1660,15 @@ server <- function(input, output, session) {
 
     x <- setup$inputs
     f <- setup$data_files
+    update_mapping_select <- function(id, value) {
+      value <- value %||% ""
+      updateSelectizeInput(
+        session,
+        id,
+        choices = unique(c("", value)),
+        selected = value
+      )
+    }
 
     updateTextInput(session, "years", value = x$years %||% defaults$inputs$years)
     updateTextInput(session, "run_label", value = x$run_label %||% "")
@@ -1576,28 +1676,27 @@ server <- function(input, output, session) {
                              selected = x$steps %||% defaults$inputs$steps)
     updateCheckboxInput(session, "do_benchmark",
                         value = isTRUE(x$do_benchmark))
-    updateTextInput(session, "var_benchmark_level",
-                    value = x$var_benchmark_level %||% "")
-    updateTextInput(session, "var_year", value = x$var_year %||% "year")
-    updateTextInput(session, "var_domain", value = x$var_domain %||% "prov")
-    updateTextInput(session, "var_psu", value = x$var_psu %||% "ea_id")
-    updateTextInput(session, "var_weight", value = x$var_weight %||% "weight")
-    updateTextInput(session, "var_strata", value = x$var_strata %||% "")
-    updateTextInput(session, "var_hh_size", value = x$var_hh_size %||% "hhsize")
-    updateTextInput(session, "var_welfare", value = x$var_welfare %||% "income")
+    update_mapping_select("var_benchmark_level", x$var_benchmark_level %||% "")
+    update_mapping_select("var_year", x$var_year %||% "year")
+    update_mapping_select("var_domain", x$var_domain %||% "prov")
+    update_mapping_select("var_psu", x$var_psu %||% "ea_id")
+    update_mapping_select("var_weight", x$var_weight %||% "weight")
+    update_mapping_select("var_strata", x$var_strata %||% "")
+    update_mapping_select("var_hh_size", x$var_hh_size %||% "hhsize")
+    update_mapping_select("var_welfare", x$var_welfare %||% "income")
     updateSelectInput(session, "indicator_type",
                       selected = x$indicator_type %||% "poverty")
     updateRadioButtons(session, "povline_type",
                        selected = x$povline_type %||% "column")
-    updateTextInput(session, "var_povline", value = x$var_povline %||% "povline")
+    update_mapping_select("var_povline", x$var_povline %||% "povline")
     updateNumericInput(session, "povline_numeric",
                        value = x$povline_numeric %||% 5000)
     updateSelectInput(session, "fgt_alpha",
                       selected = as.character(x$fgt_alpha %||% "0"))
     updateTextInput(session, "currency_symbol",
                     value = x$currency_symbol %||% "EUR")
-    updateTextInput(session, "rhs_domain", value = x$rhs_domain %||% "prov")
-    updateTextInput(session, "shp_domain", value = x$shp_domain %||% "prov")
+    update_mapping_select("rhs_domain", x$rhs_domain %||% "prov")
+    update_mapping_select("shp_domain", x$shp_domain %||% "prov")
     updateSelectInput(session, "ufh_ic_criterion",
                       selected = x$ufh_ic_criterion %||% "BIC")
     updateTextInput(session, "ufh_candidates_y1",
@@ -1728,16 +1827,16 @@ server <- function(input, output, session) {
   output$outputs <- renderTable(output_rows(), striped = TRUE)
   output$saved_setup_status <- renderUI({
     file_line <- function(label, key) {
-      nm <- setup_file_name_for(key)
-      if (!nzchar(nm)) {
+      ref <- setup_file_ref_for(key)
+      if (!nzchar(ref)) {
         return(tags$div(tags$strong(label), ": not set"))
       }
-      ok <- setup_file_exists(nm)
+      ok <- setup_file_exists(ref)
       tags$div(
-        tags$strong(label), ": ", basename(nm),
+        tags$strong(label), ": ", basename(ref),
         tags$span(
           style = sprintf("color:%s;", if (ok) "#2e7d32" else "#b26a00"),
-          if (ok) " (found)" else " (not found in data/)"
+          if (ok) " (found)" else " (not found; browse again)"
         )
       )
     }
@@ -1764,13 +1863,13 @@ server <- function(input, output, session) {
     saved_name <- setup_file_name_for(key)
 
     if (uploaded) {
-      msg <- sprintf("Active %s: %s (new upload for this session)", label, basename(file_input$name))
+      msg <- sprintf("Active %s: %s (selected for this session)", label, basename(file_input$name))
       color <- "#2e7d32"
     } else if (!is.null(path) && nzchar(path) && file.exists(path)) {
-      msg <- sprintf("Active %s: data/%s", label, basename(path))
+      msg <- sprintf("Active %s: %s (loaded from saved setup)", label, basename(path))
       color <- "#2e7d32"
     } else if (nzchar(saved_name)) {
-      msg <- sprintf("Saved %s file not found in data/: %s", label, basename(saved_name))
+      msg <- sprintf("Saved %s file not found: %s. Browse again to select it.", label, basename(saved_name))
       color <- "#b26a00"
     } else if (isTRUE(required)) {
       msg <- sprintf("Active %s: none selected", label)
@@ -1800,6 +1899,155 @@ server <- function(input, output, session) {
   })
   output$population_active_file <- renderUI({
     active_file_ui("population file", input$population_file, "population_file", required = FALSE)
+  })
+
+  read_dataset_columns <- function(path) {
+    path <- path %||% ""
+    if (!nzchar(path) || !file.exists(path)) {
+      return(character())
+    }
+    cols <- tryCatch({
+      obj <- readRDS(path)
+      names(obj)
+    }, error = function(e) character())
+    cols <- unique(trimws(as.character(cols %||% character())))
+    cols[nzchar(cols)]
+  }
+
+  survey_columns <- reactive({
+    read_dataset_columns(resolve_data_input(
+      input$survey_file,
+      fallback = saved_setup_path_for("survey_file")
+    ))
+  })
+
+  rhs_columns <- reactive({
+    read_dataset_columns(resolve_data_input(
+      input$rhs_file,
+      fallback = saved_setup_path_for("rhs_file")
+    ))
+  })
+
+  shp_columns <- reactive({
+    read_dataset_columns(resolve_data_input(
+      input$shp_file,
+      fallback = saved_setup_path_for("shp_file")
+    ))
+  })
+
+  update_mapping_choices <- function(id, cols) {
+    current <- isolate(input[[id]] %||% "")
+    updateSelectizeInput(
+      session,
+      id,
+      choices = unique(c("", cols, current)),
+      selected = current
+    )
+  }
+
+  observe({
+    cols <- survey_columns()
+    for (id in c(
+      "var_year", "var_domain", "var_psu", "var_weight",
+      "var_strata", "var_hh_size", "var_welfare",
+      "var_povline", "var_benchmark_level"
+    )) {
+      update_mapping_choices(id, cols)
+    }
+  })
+
+  observe({
+    cols <- rhs_columns()
+    update_mapping_choices("rhs_domain", cols)
+  })
+
+  observe({
+    cols <- shp_columns()
+    update_mapping_choices("shp_domain", cols)
+  })
+
+  mapping_invalid_entries <- reactive({
+    entries <- list()
+    add_entry <- function(id, label, cols, required = TRUE, enabled = TRUE) {
+      if (!isTRUE(enabled) || length(cols) == 0) {
+        return()
+      }
+      value <- trimws(input[[id]] %||% "")
+      invalid <- if (nzchar(value)) {
+        !(value %in% cols)
+      } else {
+        isTRUE(required)
+      }
+      if (isTRUE(invalid)) {
+        entries[[length(entries) + 1L]] <<- list(
+          id = id,
+          label = label,
+          value = value
+        )
+      }
+    }
+
+    s_cols <- survey_columns()
+    r_cols <- rhs_columns()
+    g_cols <- shp_columns()
+    add_entry("var_year", "year", s_cols)
+    add_entry("var_domain", "domain", s_cols)
+    add_entry("var_psu", "psu", s_cols)
+    add_entry("var_weight", "weight", s_cols)
+    add_entry("var_strata", "strata", s_cols, required = FALSE)
+    add_entry("var_hh_size", "household size", s_cols)
+    add_entry("var_welfare", "welfare", s_cols)
+    add_entry(
+      "var_povline", "povline", s_cols,
+      required = TRUE,
+      enabled = identical(input$indicator_type %||% "poverty", "poverty") &&
+        identical(input$povline_type %||% "column", "column")
+    )
+    add_entry(
+      "var_benchmark_level", "benchmark level", s_cols,
+      required = FALSE,
+      enabled = isTRUE(input$do_benchmark)
+    )
+    add_entry("rhs_domain", "auxiliary domain field", r_cols)
+    add_entry("shp_domain", "shapefile domain field", g_cols)
+    entries
+  })
+
+  observe({
+    invalid <- mapping_invalid_entries()
+    invalid_ids <- vapply(invalid, function(x) x$id, character(1))
+    all_ids <- c(
+      "var_year", "var_domain", "var_psu", "var_weight",
+      "var_strata", "var_hh_size", "var_welfare", "var_povline",
+      "var_benchmark_level", "rhs_domain", "shp_domain"
+    )
+    for (id in all_ids) {
+      session$sendCustomMessage(
+        "mappingValidity",
+        list(
+          id = id,
+          invalid = id %in% invalid_ids,
+          message = "Column not found in selected dataset"
+        )
+      )
+    }
+  })
+
+  output$mapping_validation_summary <- renderUI({
+    invalid <- mapping_invalid_entries()
+    if (length(invalid) == 0) {
+      return(NULL)
+    }
+    labels <- vapply(invalid, function(x) {
+      val <- if (nzchar(x$value)) paste0("'", x$value, "'") else "(blank)"
+      paste0(x$label, " = ", val)
+    }, character(1))
+    tags$div(
+      class = "mapping-validation-summary",
+      tags$strong("Check variable mapping: "),
+      paste(labels, collapse = "; "),
+      ". Red fields are not found in the selected dataset."
+    )
   })
 
   set_active_setup_file <- function(key, file_name) {
@@ -1872,6 +2120,9 @@ server <- function(input, output, session) {
     apply_dashboard_setup(dashboard_setup_defaults(), "default setup")
     if (file.exists(dashboard_setup_path())) {
       unlink(dashboard_setup_path(), force = TRUE)
+    }
+    if (dir.exists(dashboard_setup_file_dir())) {
+      unlink(dashboard_setup_file_dir(), recursive = TRUE, force = TRUE)
     }
     append_log("Reset dashboard controls to default setup.")
     showNotification(
@@ -1986,13 +2237,13 @@ server <- function(input, output, session) {
     rhs_path <- resolve_data_input(input$rhs_file, fallback = saved_setup_path_for("rhs_file"))
     shp_path <- resolve_data_input(input$shp_file, fallback = saved_setup_path_for("shp_file"))
     if (!file.exists(survey_path %||% "")) {
-      actions <- c(actions, sprintf("- Put the household survey `.rds` file in the package `data/` subfolder, then choose it in the Survey data file box. Resolved path: `%s`.", display_data_path(survey_path)))
+      actions <- c(actions, sprintf("- Choose the household survey `.rds` file with the Survey data Browse button. Resolved path: `%s`.", display_data_path(survey_path)))
     }
     if (!file.exists(rhs_path %||% "")) {
-      actions <- c(actions, sprintf("- Put the auxiliary covariates `.rds` file in the package `data/` subfolder, then choose it in the Auxiliary covariates file box. Resolved path: `%s`.", display_data_path(rhs_path)))
+      actions <- c(actions, sprintf("- Choose the auxiliary covariates `.rds` file with the Auxiliary data Browse button. Resolved path: `%s`.", display_data_path(rhs_path)))
     }
     if (!file.exists(shp_path %||% "")) {
-      actions <- c(actions, sprintf("- Put the shapefiles/geometries `.rds` file in the package `data/` subfolder, then choose it in the Shapefiles file box. Resolved path: `%s`.", display_data_path(shp_path)))
+      actions <- c(actions, sprintf("- Choose the shapefiles/geometries `.rds` file with the Shapefile/geometries Browse button. Resolved path: `%s`.", display_data_path(shp_path)))
     }
 
     if (!requireNamespace("sf", quietly = TRUE)) {
@@ -2231,7 +2482,7 @@ server <- function(input, output, session) {
     if (length(missing_inputs) > 0) {
       msg <- paste0(
         "Missing data input(s): ", paste(missing_inputs, collapse = ", "),
-        ". Choose the files from the data/ folder before checking readiness."
+        ". Choose the files with the Browse buttons before checking readiness."
       )
       status("Data readiness check failed")
       append_log(paste("ERROR:", msg))
@@ -2502,7 +2753,7 @@ server <- function(input, output, session) {
     if (length(missing_inputs) > 0) {
       msg <- paste0(
         "Missing data input(s): ", paste(missing_inputs, collapse = ", "),
-        ". Choose the files from the data/ folder before running analysis."
+        ". Choose the files with the Browse buttons before running analysis."
       )
       status("Missing data inputs")
       append_log(paste("ERROR:", msg))

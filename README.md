@@ -30,15 +30,20 @@ Keep the terminal or launcher window open while using the dashboard.
 
 ## Data Files
 
-Before running the app, place all three required `.rds` datasets in the package
-`data/` subfolder:
+Before running the app, prepare the three required `.rds` datasets:
 
 - household survey data
 - auxiliary covariates
 - shapefiles/geometries as an `sf` object
 
-File names can be anything. In the dashboard, choose the three files from the
-Data inputs dropdowns, or use the upload buttons to select files directly.
+The files can be saved anywhere on your computer. In the dashboard, use the
+Data inputs Browse buttons to select the three files. The variable mapping
+fields then show searchable dropdowns based on the selected datasets, while
+still allowing users to type a column name directly.
+
+If you click `Save Current Setup`, the dashboard stores local setup copies of
+selected files under `app_runs/_last_setup_files` so `Load Last Setup` can
+restore the previous selections in the next session.
 
 ## Included Runtime Files
 
