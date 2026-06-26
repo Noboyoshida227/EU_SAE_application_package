@@ -71,6 +71,23 @@ sae_read_table_input <- function(path, label = "input file") {
   sae_simplify_imported_columns(out)
 }
 
+sae_validate_esri_shapefile_components <- function(shp_path, label = "geometry file") {
+  base <- tools::file_path_sans_ext(shp_path)
+  required <- paste0(base, c(".shp", ".shx", ".dbf"))
+  present <- file.exists(required)
+  if (!all(present)) {
+    missing <- basename(required[!present])
+    stop(
+      label, " is an incomplete ESRI shapefile. ",
+      "Upload a single .zip containing all shapefile components, especially .shp, .shx, and .dbf. ",
+      "A .shp file alone is usually not enough because the .dbf stores the domain ID used for mapping. ",
+      "Missing component(s): ", paste(missing, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
 sae_read_geometry_input <- function(path, label = "geometry file") {
   if (is.null(path) || !nzchar(path %||% "") || !file.exists(path)) {
     stop(label, " does not exist: ", path %||% "(blank)", call. = FALSE)
@@ -102,9 +119,12 @@ sae_read_geometry_input <- function(path, label = "geometry file") {
   } else if (!ext %in% c("shp", "gpkg", "geojson", "json", "kml", "gml")) {
     stop(
       "Unsupported ", label, " format: .", ext,
-      ". Accepted geometry formats are .rds, .RData/.rda, .zip shapefile, .shp, .gpkg, .geojson, .json, .kml, and .gml.",
+      ". Accepted geometry formats are .rds, .RData/.rda, ESRI shapefile .zip, .gpkg, .geojson, .json, .kml, and .gml.",
       call. = FALSE
     )
+  }
+  if (identical(tolower(tools::file_ext(spatial_path)), "shp")) {
+    sae_validate_esri_shapefile_components(spatial_path, label)
   }
   sf::st_read(spatial_path, quiet = TRUE)
 }

@@ -1145,7 +1145,7 @@ ui <- fluidPage(
       h4("Data inputs"),
       tags$div(
         style = "font-size: 12px; color: #556; margin: -4px 0 10px 0;",
-        "Use Browse to select the required input files from any folder on your computer: household survey, auxiliary covariates, and shapefiles/geometries. Survey and auxiliary files can be .rds, .csv, .dta, or Excel files; geometry files can be .rds, zipped shapefiles, GeoPackage, or GeoJSON. If a saved setup is loaded, its active files are shown below each Browse button; browse again only when changing a file."
+        "Use Browse to select the required input files from any folder on your computer: household survey, auxiliary covariates, and shapefiles/geometries. Survey and auxiliary files can be .rds, .csv, .dta, or Excel files. For ESRI shapefiles, upload one .zip containing the shapefile components, especially .shp, .shx, and .dbf; the .dbf usually contains the domain ID needed for maps. Geometry files can also be .rds, GeoPackage, or GeoJSON. If a saved setup is loaded, its active files are shown below each Browse button; browse again only when changing a file."
       ),
       fileInput("survey_file",
         tip_label("Browse Survey data file", "Choose the household survey file from any folder on your computer. Accepted formats: .rds, .RData/.rda, .csv, .tsv, .txt, .dta, .xlsx, .xls."),
@@ -1156,8 +1156,8 @@ ui <- fluidPage(
         accept = c(".rds", ".RData", ".rda", ".csv", ".tsv", ".txt", ".dta", ".xlsx", ".xls")),
       uiOutput("rhs_active_file"),
       fileInput("shp_file",
-        tip_label("Browse Shapefile/geometries file", "Choose the geometry file from any folder on your computer. Accepted formats: .rds, .RData/.rda, zipped shapefile .zip, .shp, .gpkg, .geojson, .json, .kml, .gml. For ESRI shapefiles, a .zip containing .shp/.dbf/.shx is recommended."),
-        accept = c(".rds", ".RData", ".rda", ".zip", ".shp", ".gpkg", ".geojson", ".json", ".kml", ".gml")),
+        tip_label("Browse Shapefile/geometries file", "Choose the geometry file from any folder on your computer. For ESRI shapefiles, upload a single .zip containing all shapefile components, especially .shp, .shx, and .dbf. A .shp file alone is usually not enough because the .dbf stores the domain ID used to join estimates to map polygons. Other accepted formats: .rds, .RData/.rda, .gpkg, .geojson, .json, .kml, .gml."),
+        accept = c(".rds", ".RData", ".rda", ".zip", ".gpkg", ".geojson", ".json", ".kml", ".gml")),
       uiOutput("shp_active_file"),
       checkboxInput("do_benchmark",
         tip_label("Apply benchmarking", "If checked, UFH and MFH estimates are benchmarked. If unchecked, uploaded benchmark files and benchmark-level mappings are ignored for the next run."),
@@ -2407,7 +2407,7 @@ server <- function(input, output, session) {
       actions <- c(actions, sprintf("- Choose the auxiliary covariates file with the Auxiliary data Browse button. Accepted formats include `.rds`, `.csv`, and `.dta`. Resolved path: `%s`.", display_data_path(rhs_path)))
     }
     if (!file.exists(shp_path %||% "")) {
-      actions <- c(actions, sprintf("- Choose the shapefiles/geometries file with the Shapefile/geometries Browse button. Accepted formats include `.rds`, zipped shapefile `.zip`, `.gpkg`, and `.geojson`. Resolved path: `%s`.", display_data_path(shp_path)))
+      actions <- c(actions, sprintf("- Choose the shapefiles/geometries file with the Shapefile/geometries Browse button. For ESRI shapefiles, upload one `.zip` containing `.shp`, `.shx`, and `.dbf`; a standalone `.shp` file is usually not enough. Other accepted formats include `.rds`, `.gpkg`, and `.geojson`. Resolved path: `%s`.", display_data_path(shp_path)))
     }
 
     if (!requireNamespace("sf", quietly = TRUE)) {
