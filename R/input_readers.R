@@ -75,13 +75,22 @@ sae_validate_esri_shapefile_components <- function(shp_path, label = "geometry f
   base <- tools::file_path_sans_ext(shp_path)
   required <- paste0(base, c(".shp", ".shx", ".dbf"))
   present <- file.exists(required)
-  if (!all(present)) {
-    missing <- basename(required[!present])
+  sizes <- suppressWarnings(file.info(required)$size)
+  empty <- present & (is.na(sizes) | sizes <= 0)
+  if (!all(present) || any(empty)) {
+    problems <- c(
+      if (any(!present)) {
+        paste("Missing component(s):", paste(basename(required[!present]), collapse = ", "))
+      },
+      if (any(empty)) {
+        paste("Empty component(s):", paste(basename(required[empty]), collapse = ", "))
+      }
+    )
     stop(
       label, " is an incomplete ESRI shapefile. ",
       "Upload a single .zip containing all shapefile components, especially .shp, .shx, and .dbf. ",
       "A .shp file alone is usually not enough because the .dbf stores the domain ID used for mapping. ",
-      "Missing component(s): ", paste(missing, collapse = ", "),
+      paste(problems, collapse = "; "),
       call. = FALSE
     )
   }

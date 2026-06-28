@@ -2783,29 +2783,42 @@ server <- function(input, output, session) {
       }
     }
 
-    geo_raw <- tryCatch(
-      sae_read_geometry_input(shp_path, "Geometry data"),
-      error = function(e) NULL
+    geo_read <- tryCatch(
+      list(data = sae_read_geometry_input(shp_path, "Geometry data"),
+           messages = character()),
+      error = function(e) list(
+        data = NULL,
+        messages = sprintf(
+          "Test 2: ERROR -- Geometry data could not be read: %s",
+          conditionMessage(e)
+        )
+      )
     )
     readiness_survey <- filter_to_analysis_years(harmonized$survey, requested_years)
     readiness_rhs <- filter_to_analysis_years(harmonized$rhs, requested_years)
-    rr <- assess_data_readiness(
-      survey_data    = readiness_survey,
-      aux_data       = readiness_rhs,
-      geo_data       = geo_raw,
-      domain_var     = input$shp_domain,
-      save_to        = "outputs/tables",
-      fgt_alpha      = as.integer(input$fgt_alpha %||% 0),
-      indicator_type = input$indicator_type %||% "poverty",
-      # Readiness assesses log-specific issues (non-positive welfare,
-      # extreme tails after logging, etc.) whenever EITHER pipeline
-      # plans to fit on log. UFH and MFH now have independent
-      # transformation choices, so we OR the two flags.
-      log_transform  = identical(input$indicator_type, "mean_welfare") &&
-                       (identical(input$ufh_transformation, "log") ||
-                        identical(input$mfh_transformation, "log"))
+    rr <- tryCatch(
+      assess_data_readiness(
+        survey_data    = readiness_survey,
+        aux_data       = readiness_rhs,
+        geo_data       = geo_read$data,
+        domain_var     = input$shp_domain,
+        save_to        = "outputs/tables",
+        fgt_alpha      = as.integer(input$fgt_alpha %||% 0),
+        indicator_type = input$indicator_type %||% "poverty",
+        # Readiness assesses log-specific issues (non-positive welfare,
+        # extreme tails after logging, etc.) whenever EITHER pipeline
+        # plans to fit on log. UFH and MFH now have independent
+        # transformation choices, so we OR the two flags.
+        log_transform  = identical(input$indicator_type, "mean_welfare") &&
+                         (identical(input$ufh_transformation, "log") ||
+                          identical(input$mfh_transformation, "log"))
+      ),
+      error = function(e) empty_readiness_result(sprintf(
+        "Data readiness ERROR -- %s",
+        conditionMessage(e)
+      ))
     )
-    rr$messages <- c(year_msgs, rr$messages)
+    rr$messages <- c(year_msgs, geo_read$messages, rr$messages)
     readiness_result(rr)
     append_log(sprintf("Data readiness: %d diagnostic messages", length(rr$messages)))
 
@@ -3084,28 +3097,41 @@ server <- function(input, output, session) {
         }
       }
 
-      geo_raw <- tryCatch(
-        sae_read_geometry_input(shp_path, "Geometry data"),
-        error = function(e) NULL
+      geo_read <- tryCatch(
+        list(data = sae_read_geometry_input(shp_path, "Geometry data"),
+             messages = character()),
+        error = function(e) list(
+          data = NULL,
+          messages = sprintf(
+            "Test 2: ERROR -- Geometry data could not be read: %s",
+            conditionMessage(e)
+          )
+        )
       )
       readiness_survey <- filter_to_analysis_years(harmonized$survey, requested_years)
       readiness_rhs <- filter_to_analysis_years(harmonized$rhs, requested_years)
-      rr <- assess_data_readiness(
-        survey_data    = readiness_survey,
-        aux_data       = readiness_rhs,
-        geo_data       = geo_raw,
-        domain_var     = input$shp_domain,
-        save_to        = "outputs/tables",
-        fgt_alpha      = as.integer(input$fgt_alpha %||% 0),
-        indicator_type = input$indicator_type %||% "poverty",
-        # OR over UFH and MFH transformation choices -- see longer
-        # comment on the first readiness call site above.
-        log_transform  = identical(input$indicator_type, "mean_welfare") &&
-                         (identical(input$ufh_transformation, "log") ||
-                          identical(input$mfh_transformation, "log"))
+      rr <- tryCatch(
+        assess_data_readiness(
+          survey_data    = readiness_survey,
+          aux_data       = readiness_rhs,
+          geo_data       = geo_read$data,
+          domain_var     = input$shp_domain,
+          save_to        = "outputs/tables",
+          fgt_alpha      = as.integer(input$fgt_alpha %||% 0),
+          indicator_type = input$indicator_type %||% "poverty",
+          # OR over UFH and MFH transformation choices -- see longer
+          # comment on the first readiness call site above.
+          log_transform  = identical(input$indicator_type, "mean_welfare") &&
+                           (identical(input$ufh_transformation, "log") ||
+                            identical(input$mfh_transformation, "log"))
+        ),
+        error = function(e) empty_readiness_result(sprintf(
+          "Data readiness ERROR -- %s",
+          conditionMessage(e)
+        ))
       )
       # Prepend year-variable checks to readiness messages
-      rr$messages <- c(year_msgs, rr$messages)
+      rr$messages <- c(year_msgs, geo_read$messages, rr$messages)
       readiness_result(rr)
       append_log(sprintf("Data readiness: %d diagnostic messages", length(rr$messages)))
       readiness_errors <- isTRUE(flags$has_errors) ||

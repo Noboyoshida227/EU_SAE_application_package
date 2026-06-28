@@ -208,6 +208,74 @@ validate_inputs <- function(survey_data, aux_data) {
 # they are ready for UFH and MFH analysis.
 # ============================================================
 
+readiness_column_issues <- function(data, needed, label) {
+  nms <- names(data)
+  missing <- setdiff(needed, nms)
+  dups <- needed[vapply(needed, function(x) sum(nms == x) > 1L, logical(1))]
+
+  if (!length(missing) && !length(dups)) {
+    return(character())
+  }
+
+  parts <- c(
+    if (length(missing)) {
+      sprintf("missing column(s): %s", paste(missing, collapse = ", "))
+    },
+    if (length(dups)) {
+      sprintf("duplicated column(s): %s", paste(dups, collapse = ", "))
+    }
+  )
+  sprintf("%s %s", label, paste(parts, collapse = "; "))
+}
+
+empty_readiness_result <- function(messages = character(),
+                                   cor_target_label = "Corr. w/ Poverty") {
+  aux_summary <- data.frame(
+    variable    = character(),
+    mean        = numeric(),
+    se          = numeric(),
+    n_obs       = integer(),
+    cor_poverty = numeric(),
+    stringsAsFactors = FALSE
+  )
+  attr(aux_summary, "cor_target_label") <- cor_target_label
+
+  list(
+    aux_summary        = aux_summary,
+    domain_consistency = list(
+      survey_domains    = character(),
+      aux_domains       = character(),
+      geo_domains       = NULL,
+      in_survey_not_aux = character(),
+      in_aux_not_survey = character(),
+      in_survey_not_geo = NULL,
+      in_geo_not_survey = NULL,
+      all_consistent    = FALSE
+    ),
+    missing_poverty    = data.frame(
+      domain = character(),
+      year   = integer(),
+      reason = character(),
+      stringsAsFactors = FALSE
+    ),
+    national_poverty   = data.frame(
+      year          = integer(),
+      national_rate = numeric(),
+      n_households  = integer(),
+      n_domains     = integer(),
+      stringsAsFactors = FALSE
+    ),
+    domain_poverty     = data.frame(
+      domain       = character(),
+      year         = integer(),
+      poverty_rate = numeric(),
+      n_obs        = integer(),
+      stringsAsFactors = FALSE
+    ),
+    messages           = messages
+  )
+}
+
 #' Assess data readiness for UFH / MFH analysis
 #'
 #' @param survey_data  Harmonised household survey data.frame
@@ -248,6 +316,29 @@ assess_data_readiness <- function(survey_data,
       "2" = "poverty severity",
       "poverty rate"
     )
+  }
+  cor_target_label <- sprintf("Corr. w/ %s", tools::toTitleCase(fgt_noun))
+
+  survey_key_issues <- readiness_column_issues(
+    survey_data, c("domain", "year"), "survey data"
+  )
+  if (length(survey_key_issues) > 0) {
+    return(empty_readiness_result(c(msgs, sprintf(
+      "Test 0a: ERROR -- Data readiness cannot run because survey key columns are invalid: %s. Check the survey 'domain'/'year' mapping.",
+      paste(survey_key_issues, collapse = "; ")
+    )), cor_target_label = cor_target_label))
+  }
+
+  aux_key_issues <- readiness_column_issues(
+    aux_data, c("domain", "year"), "auxiliary covariates"
+  )
+  aux_keys_ok <- length(aux_key_issues) == 0
+  if (!aux_keys_ok) {
+    msgs <- c(msgs, sprintf(
+      "Test 1: ERROR -- auxiliary covariates cannot be linked to %s: %s. Check the auxiliary 'domain'/'year' column mapping.",
+      fgt_noun,
+      paste(aux_key_issues, collapse = "; ")
+    ))
   }
 
   # ------------------------------------------------------------------
@@ -331,8 +422,17 @@ assess_data_readiness <- function(survey_data,
   aux_vars <- aux_vars[vapply(aux_data[aux_vars], is.numeric, logical(1))]
 
   # Merge auxiliary data with poverty rates for correlation
-  aux_merged <- merge(aux_data, pov_rates[, c("domain", "year", "poverty_rate")],
-                      by = c("domain", "year"), all.x = TRUE)
+  if (aux_keys_ok) {
+    aux_merged <- merge(
+      aux_data,
+      pov_rates[, c("domain", "year", "poverty_rate")],
+      by = c("domain", "year"),
+      all.x = TRUE
+    )
+  } else {
+    aux_merged <- aux_data
+    aux_merged$poverty_rate <- NA_real_
+  }
 
   aux_summary <- data.frame(
     variable    = aux_vars,
@@ -364,8 +464,7 @@ assess_data_readiness <- function(survey_data,
   # render a meaningful column header (the column itself stays named
   # `cor_poverty` for back-compat with the saved CSV and any downstream
   # consumers that read it by name).
-  attr(aux_summary, "cor_target_label") <- sprintf("Corr. w/ %s",
-    tools::toTitleCase(fgt_noun))
+  attr(aux_summary, "cor_target_label") <- cor_target_label
 
   msgs <- c(msgs, sprintf(
     "Test 1: Auxiliary covariate summary computed for %d variables across %d domain-year observations (correlation against %s).",
@@ -376,7 +475,7 @@ assess_data_readiness <- function(survey_data,
   # Test 2. Domain consistency across all three datasets
   # ------------------------------------------------------------------
   survey_domains <- sort(unique(survey_data$domain))
-  aux_domains    <- sort(unique(aux_data$domain))
+  aux_domains    <- if (aux_keys_ok) sort(unique(aux_data$domain)) else character()
 
   domain_info <- list(
     survey_domains = survey_domains,
@@ -390,7 +489,18 @@ assess_data_readiness <- function(survey_data,
   )
 
   if (!is.null(geo_data)) {
-    geo_dom <- sort(unique(geo_data[[domain_var]]))
+    geo_key_issues <- readiness_column_issues(
+      geo_data, domain_var, "geometry data"
+    )
+    if (length(geo_key_issues) > 0) {
+      msgs <- c(msgs, sprintf(
+        "Test 2: ERROR -- Geometry domain column is invalid: %s. Check the shapefile/geometries domain mapping.",
+        paste(geo_key_issues, collapse = "; ")
+      ))
+      geo_dom <- character()
+    } else {
+      geo_dom <- sort(unique(geo_data[[domain_var]]))
+    }
     domain_info$geo_domains       <- geo_dom
     domain_info$in_survey_not_geo <- setdiff(survey_domains, geo_dom)
     domain_info$in_geo_not_survey <- setdiff(geo_dom, survey_domains)
@@ -432,36 +542,40 @@ assess_data_readiness <- function(survey_data,
     domain = character(), year = integer(),
     reason = character(), stringsAsFactors = FALSE
   )
-  for (yr in years) {
-    aux_yr     <- aux_data$domain[aux_data$year == yr]
-    pov_yr     <- pov_rates[pov_rates$year == yr, ]
-    # Domains in auxiliary data without a poverty rate
-    no_rate    <- setdiff(aux_yr, pov_yr$domain)
-    if (length(no_rate) > 0) {
-      missing_pov <- rbind(missing_pov, data.frame(
-        domain = no_rate, year = yr,
-        reason = "no survey observations",
-        stringsAsFactors = FALSE
-      ))
-    }
-    # Domains with NA poverty rate (e.g., all welfare or povline missing)
-    na_rate <- pov_yr$domain[is.na(pov_yr$poverty_rate)]
-    if (length(na_rate) > 0) {
-      missing_pov <- rbind(missing_pov, data.frame(
-        domain = na_rate, year = yr,
-        reason = "poverty rate is NA",
-        stringsAsFactors = FALSE
-      ))
-    }
-  }
-
-  if (nrow(missing_pov) == 0) {
-    msgs <- c(msgs, "Test 3: No missing poverty rates -- all domains have survey-based estimates.")
+  if (!aux_keys_ok) {
+    msgs <- c(msgs, "Test 3: ERROR -- Missing-rate checks were skipped because auxiliary domain/year columns are invalid.")
   } else {
-    msgs <- c(msgs, sprintf(
-      "Test 3: WARNING -- %d domain-year(s) have missing poverty rates.",
-      nrow(missing_pov)
-    ))
+    for (yr in years) {
+      aux_yr     <- aux_data$domain[aux_data$year == yr]
+      pov_yr     <- pov_rates[pov_rates$year == yr, ]
+      # Domains in auxiliary data without a poverty rate
+      no_rate    <- setdiff(aux_yr, pov_yr$domain)
+      if (length(no_rate) > 0) {
+        missing_pov <- rbind(missing_pov, data.frame(
+          domain = no_rate, year = yr,
+          reason = "no survey observations",
+          stringsAsFactors = FALSE
+        ))
+      }
+      # Domains with NA poverty rate (e.g., all welfare or povline missing)
+      na_rate <- pov_yr$domain[is.na(pov_yr$poverty_rate)]
+      if (length(na_rate) > 0) {
+        missing_pov <- rbind(missing_pov, data.frame(
+          domain = na_rate, year = yr,
+          reason = "poverty rate is NA",
+          stringsAsFactors = FALSE
+        ))
+      }
+    }
+
+    if (nrow(missing_pov) == 0) {
+      msgs <- c(msgs, "Test 3: No missing poverty rates -- all domains have survey-based estimates.")
+    } else {
+      msgs <- c(msgs, sprintf(
+        "Test 3: WARNING -- %d domain-year(s) have missing poverty rates.",
+        nrow(missing_pov)
+      ))
+    }
   }
 
   # ------------------------------------------------------------------
