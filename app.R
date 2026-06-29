@@ -415,7 +415,9 @@ build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
                                indicator_type = "poverty",
                                log_transform = FALSE) {
   sv <- survey_data[survey_data$year == yr, ]
-  n_domains <- length(unique(sv$domain))
+  domain_values <- trimws(as.character(sv$domain))
+  valid_domain <- !is.na(domain_values) & nzchar(domain_values)
+  n_domains <- length(unique(domain_values[valid_domain]))
 
   # Population-weighted per-domain summary so the dashboard agrees with the
   # `survey::svymean()`-based direct estimates the pipeline actually
@@ -428,14 +430,29 @@ build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
     sv$weight
   }
   weighted_mean_by_domain <- function(target, domain, weight) {
-    domains <- unique(domain)
+    domain <- trimws(as.character(domain))
+    target <- suppressWarnings(as.numeric(target))
+    weight <- suppressWarnings(as.numeric(weight))
+    domains <- unique(domain[!is.na(domain) & nzchar(domain)])
     out <- setNames(rep(NA_real_, length(domains)), as.character(domains))
     for (d in domains) {
-      idx <- domain == d
-      ok  <- idx & !is.na(target) & !is.na(weight)
-      if (any(ok)) out[as.character(d)] <- stats::weighted.mean(target[ok], weight[ok])
+      idx <- !is.na(domain) & domain == d
+      ok <- idx & is.finite(target) & is.finite(weight) & weight > 0
+      if (any(ok, na.rm = TRUE)) {
+        out[as.character(d)] <- stats::weighted.mean(target[ok], weight[ok])
+      }
     }
     out
+  }
+  safe_scalar_summary <- function(x, fn) {
+    x <- x[is.finite(x)]
+    if (!length(x)) return(NA_real_)
+    fn(x)
+  }
+  safe_range <- function(x) {
+    x <- x[is.finite(x)]
+    if (!length(x)) return(c(NA_real_, NA_real_))
+    range(x)
   }
 
   if (identical(indicator_type, "mean_welfare")) {
@@ -469,9 +486,9 @@ build_year_summary <- function(survey_data, yr, fgt_alpha = 0L,
   )
 
   bench <- list(
-    estimate_range   = round(range(pov_rates, na.rm = TRUE), 4),
-    estimate_median  = round(median(pov_rates, na.rm = TRUE), 4),
-    estimate_mean    = round(mean(pov_rates, na.rm = TRUE), 4),
+    estimate_range   = round(safe_range(pov_rates), 4),
+    estimate_median  = round(safe_scalar_summary(pov_rates, median), 4),
+    estimate_mean    = round(safe_scalar_summary(pov_rates, mean), 4),
     cv_median        = NA_real_,
     cv_max           = NA_real_,
     n_cv_above_25pct = NA_integer_,

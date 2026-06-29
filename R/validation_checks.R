@@ -228,6 +228,38 @@ readiness_column_issues <- function(data, needed, label) {
   sprintf("%s %s", label, paste(parts, collapse = "; "))
 }
 
+readiness_key_value_issues <- function(data, needed, label) {
+  parts <- character()
+
+  if ("domain" %in% needed && "domain" %in% names(data)) {
+    domain <- trimws(as.character(data$domain))
+    bad_domain <- is.na(domain) | !nzchar(domain)
+    if (any(bad_domain, na.rm = TRUE)) {
+      parts <- c(parts, sprintf(
+        "%d row(s) have missing or blank domain values",
+        sum(bad_domain, na.rm = TRUE)
+      ))
+    }
+  }
+
+  if ("year" %in% needed && "year" %in% names(data)) {
+    year <- suppressWarnings(as.integer(as.character(data$year)))
+    bad_year <- is.na(year)
+    if (any(bad_year, na.rm = TRUE)) {
+      parts <- c(parts, sprintf(
+        "%d row(s) have missing or invalid year values",
+        sum(bad_year, na.rm = TRUE)
+      ))
+    }
+  }
+
+  if (!length(parts)) {
+    return(character())
+  }
+
+  sprintf("%s %s", label, paste(parts, collapse = "; "))
+}
+
 empty_readiness_result <- function(messages = character(),
                                    cor_target_label = "Corr. w/ Poverty") {
   aux_summary <- data.frame(
@@ -322,9 +354,14 @@ assess_data_readiness <- function(survey_data,
   survey_key_issues <- readiness_column_issues(
     survey_data, c("domain", "year"), "survey data"
   )
+  if (!length(survey_key_issues)) {
+    survey_key_issues <- readiness_key_value_issues(
+      survey_data, c("domain", "year"), "survey data"
+    )
+  }
   if (length(survey_key_issues) > 0) {
     return(empty_readiness_result(c(msgs, sprintf(
-      "Test 0a: ERROR -- Data readiness cannot run because survey key columns are invalid: %s. Check the survey 'domain'/'year' mapping.",
+      "Test 0a: ERROR -- Data readiness cannot run because survey domain/year keys are invalid: %s. Every survey row in the selected analysis years must have a valid domain and year. Check the survey 'domain'/'year' mapping or clean the survey data.",
       paste(survey_key_issues, collapse = "; ")
     )), cor_target_label = cor_target_label))
   }
@@ -332,6 +369,11 @@ assess_data_readiness <- function(survey_data,
   aux_key_issues <- readiness_column_issues(
     aux_data, c("domain", "year"), "auxiliary covariates"
   )
+  if (!length(aux_key_issues)) {
+    aux_key_issues <- readiness_key_value_issues(
+      aux_data, c("domain", "year"), "auxiliary covariates"
+    )
+  }
   aux_keys_ok <- length(aux_key_issues) == 0
   if (!aux_keys_ok) {
     msgs <- c(msgs, sprintf(
