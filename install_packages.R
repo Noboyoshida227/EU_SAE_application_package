@@ -27,13 +27,39 @@ if (getRversion() < .min_r_version) {
   ), call. = FALSE)
 }
 
-# --- Helper: install only if not already available ----------
-install_if_missing <- function(pkg, repos = "https://cloud.r-project.org") {
-  if (!requireNamespace(pkg, quietly = TRUE)) {
+# --- Helper: install if missing or below a minimum version ---
+local_version_report <- "package_versions.local.csv"
+
+installed_package_version <- function(pkg) {
+  tryCatch(
+    as.character(utils::packageVersion(pkg)),
+    error = function(e) NA_character_
+  )
+}
+
+install_if_missing_or_old <- function(pkg, min_version = NA_character_,
+                                      repos = "https://cloud.r-project.org") {
+  current_version <- installed_package_version(pkg)
+  installed <- !is.na(current_version)
+  has_min <- is.character(min_version) && length(min_version) == 1 &&
+    !is.na(min_version) && nzchar(min_version)
+
+  too_old <- FALSE
+  if (installed) {
+    too_old <- has_min && utils::compareVersion(current_version, min_version) < 0
+  }
+
+  if (!installed) {
     cat("  Installing:", pkg, "\n")
     install.packages(pkg, repos = repos, lib = .libPaths()[1], quiet = TRUE)
+  } else if (too_old) {
+    cat("  Updating:", pkg, "(installed", current_version,
+        "< required", min_version, ")\n")
+    install.packages(pkg, repos = repos, lib = .libPaths()[1], quiet = TRUE)
+  } else if (has_min) {
+    cat("  OK:", pkg, current_version, "(minimum", min_version, ")\n")
   } else {
-    cat("  OK:", pkg, "\n")
+    cat("  OK:", pkg, current_version, "\n")
   }
 }
 
@@ -74,8 +100,46 @@ cran_packages <- c(
   "yaml", "here", "tictoc", "conflicted", "pacman", "pins", "tools"
 )
 
+minimum_versions <- c(
+  shiny = "1.7.0",
+  data.table = "1.14.0",
+  dplyr = "1.0.0",
+  tidyr = "1.2.0",
+  purrr = "1.0.0",
+  stringr = "1.5.0",
+  tibble = "3.1.0",
+  rlang = "1.1.0",
+  haven = "2.5.0",
+  sae = "1.3",
+  msae = "0.1.5",
+  emdi = "2.0.0",
+  survey = "4.2",
+  sf = "1.0.0",
+  spdep = "1.2.0",
+  ggplot2 = "3.4.0",
+  patchwork = "1.1.0",
+  viridis = "0.6.0",
+  scales = "1.2.0",
+  gt = "0.9.0",
+  knitr = "1.40",
+  rmarkdown = "2.20",
+  openxlsx = "4.2.5",
+  writexl = "1.4.0",
+  readxl = "1.4.0",
+  Matrix = "1.5.0",
+  httr = "1.4.0",
+  jsonlite = "1.8.0",
+  yaml = "2.3.0",
+  here = "1.0.1"
+)
+
 for (pkg in cran_packages) {
-  install_if_missing(pkg)
+  min_version <- if (pkg %in% names(minimum_versions)) {
+    minimum_versions[[pkg]]
+  } else {
+    NA_character_
+  }
+  install_if_missing_or_old(pkg, min_version)
 }
 
 # --- 2. Optional Quarto CLI check ---------------------------
@@ -114,11 +178,15 @@ if (length(failed) == 0) {
     version = vapply(cran_packages, function(pkg) {
       as.character(utils::packageVersion(pkg))
     }, character(1)),
+    required_minimum = vapply(cran_packages, function(pkg) {
+      if (pkg %in% names(minimum_versions)) minimum_versions[[pkg]] else NA_character_
+    }, character(1)),
     stringsAsFactors = FALSE
   )
-  utils::write.csv(package_versions, "package_versions.lock.csv", row.names = FALSE)
+  utils::write.csv(package_versions, local_version_report, row.names = FALSE)
   cat("\n  All packages installed successfully.\n")
-  cat("  Package versions recorded in package_versions.lock.csv.\n")
+  cat("  Package versions recorded locally in ", local_version_report, ".\n", sep = "")
+  cat("  This local report is for troubleshooting only and is ignored by Git.\n")
   cat("  You can now run the app with:  shiny::runApp('app.R')\n\n")
 } else {
   cat("\n  WARNING: The following packages could not be loaded:\n")

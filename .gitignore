@@ -33,6 +33,10 @@ renv/staging/
 renv/local/
 renv/python/
 
+# ---- Local package version report ----
+package_versions.local.csv
+package_versions.lock.csv
+
 # ---- Temporary knitr figure caches ----
 .knitr_figs_*/
 
